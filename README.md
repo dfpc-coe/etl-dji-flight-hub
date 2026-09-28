@@ -18,10 +18,14 @@ request:
 | 2 | `GET /openapi/{version}/project/device` | List the gateway (Dock or Remote Controller) & aircraft pairs of each Project |
 | 3 | `GET /openapi/{version}/device/{device_sn}/state` | Thing Model of each online device, containing its location |
 
-Steps 1 & 2 run once per invocation. If an aircraft is airborne step 3 is repeated every `POLL_INTERVAL`
-seconds for aircraft & remote controllers until `POLL_DURATION` is spent, so that a 1 minute schedule
-still produces a track that is usable for a moving aircraft. Docks do not move and are submitted once
-per invocation.
+The default schedule is `rate(10 seconds)` so that a moving aircraft produces a usable track. Every
+invocation makes `1 + <projects> + <online devices>` requests, so an Organization with 3 Projects and
+5 online devices makes 9 requests every 10 seconds. Setting `DJI_PROJECTS` does not remove the Project
+list request, as it is the source of the Project names, but does limit the device list requests.
+
+Sub-minute schedules are run by the CloudTAK events pool rather than AWS EventBridge. Invocations are
+not queued behind one another, so the schedule should be lengthened if an invocation regularly takes
+longer than the schedule interval.
 
 A failure to list the Projects fails the invocation. A failure for a single Project or device is logged
 and the remaining devices are still submitted.
@@ -56,8 +60,6 @@ and in the feature metadata.
 | `INCLUDE_DOCKS` | Submit Dock locations (default `true`) |
 | `INCLUDE_CONTROLLERS` | Submit Remote Controller locations, which is the location of the pilot (default `true`) |
 | `INCLUDE_OFFLINE` | Also request the state of devices reported as offline (default `false`) |
-| `POLL_INTERVAL` | Seconds between location updates while an aircraft is airborne (default `10`). `0` polls once per invocation |
-| `POLL_DURATION` | Maximum seconds to keep polling per invocation (default `50`). Also capped at the Layer timeout less 15 seconds |
 | `DEBUG` | Print submitted features in the logs |
 
 The Organization Key is a JWT tied to the user that generated it. That user must be a member of each
@@ -145,7 +147,7 @@ confirmed:
   documentation above and is covered by tests against a mock of the documented responses
 - **Assumed**: `gimbal_yaw` is relative to true north, as `attitude_head` is documented to be. If sensor cones are
   drawn relative to the nose of the aircraft this assumption is wrong
-- **Unknown**: Rate limits. Error `210429` (Operations too frequent) exists - raise `POLL_INTERVAL` if it is logged
+- **Unknown**: Rate limits. Error `210429` (Operations too frequent) exists - lengthen the Layer schedule if it is logged
 
 ## Development
 

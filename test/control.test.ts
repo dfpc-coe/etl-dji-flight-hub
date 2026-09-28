@@ -192,12 +192,10 @@ async function run(api: Mock, environment: Record<string, unknown>) {
         id: 1,
         connection: 1,
         task: 'etl-dji-flight-hub-v1.0.0',
-        timeout: 120,
         incoming: {
             environment: {
                 DJI_ORG_KEY: 'org-key',
                 DJI_API_URL: api.base,
-                POLL_INTERVAL: 0,
                 ...environment
             },
             ephemeral: {}
@@ -342,27 +340,15 @@ test('control - integer mode codes, missing fixes & device failures', async () =
     }
 });
 
-test('control - polls aircraft & controllers while airborne', async () => {
+test('control - does not submit when no device reports a location', async () => {
     const api = await mock();
 
+    api.states = { [OFFLINE_DRONE.sn]: STATES[OFFLINE_DRONE.sn] };
+
     try {
-        const { submitted } = await run(api, {
-            POLL_INTERVAL: 1,
-            POLL_DURATION: 2
-        });
+        const { submitted } = await run(api, { INCLUDE_OFFLINE: true });
 
-        assert.ok(submitted.length >= 2, `expected multiple submissions, got ${submitted.length}`);
-        assert.equal(submitted[0].features.length, 3);
-
-        for (const fc of submitted.slice(1)) {
-            assert.deepEqual(fc.features.map((f) => f.id).sort(), [
-                `dji-${DOCK_DRONE.sn}`,
-                `dji-${CONTROLLER.sn}`
-            ].sort());
-        }
-
-        // Projects & device lists are only requested once per invocation
-        assert.equal(api.requests.filter((r) => r.url.includes('/project')).length, 3);
+        assert.equal(submitted.length, 0);
     } finally {
         await api.close();
     }

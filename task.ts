@@ -41,14 +41,6 @@ const InputSchema = Type.Object({
         default: false,
         description: 'Request the last known state of devices that FlightHub 2 reports as offline'
     }),
-    'POLL_INTERVAL': Type.Integer({
-        default: 10,
-        description: 'Seconds between location updates while an aircraft is airborne - Set to 0 to poll once per scheduled invocation'
-    }),
-    'POLL_DURATION': Type.Integer({
-        default: 50,
-        description: 'Maximum number of seconds to keep polling per scheduled invocation - should be less than both the Layer Timeout and the schedule interval'
-    }),
     'DEBUG': Type.Boolean({
         default: false,
         description: 'Print results in logs'
@@ -337,7 +329,7 @@ export default class Task extends ETL {
     static flow = [ DataFlowType.Incoming ];
     static invocation = [ InvocationType.Schedule ];
     static invocationDefaults = {
-        schedule: { enabled: true, cron: 'rate(1 minute)' }
+        schedule: { enabled: true, cron: 'rate(10 seconds)' }
     };
 
     async schema(
@@ -503,49 +495,24 @@ export default class Task extends ETL {
 
     async control(): Promise<void> {
         const env = await this.env(InputSchema);
-        const layer = await this.fetchLayer();
 
         const projects = await this.projects(env);
         console.log(`ok - found ${projects.length} projects`);
 
-        let tracked = await this.devices(env, projects);
+        const tracked = await this.devices(env, projects);
         console.log(`ok - found ${tracked.length} devices`);
 
-        if (!tracked.length) return;
+        const features = await this.features(env, tracked);
+        if (!features.length) return;
 
-        // Leave enough of the Lambda timeout budget to flush the final submission
-        const deadline = Date.now() + Math.min(env.POLL_DURATION, Math.max(0, (layer.timeout || 60) - 15)) * 1000;
+        const fc: Static<typeof Feature.InputFeatureCollection> = {
+            type: 'FeatureCollection',
+            features
+        };
 
-        for (;;) {
-            const started = Date.now();
+        if (env.DEBUG) console.log(JSON.stringify(fc));
 
-            const features = await this.features(env, tracked);
-
-            if (features.length) {
-                const fc: Static<typeof Feature.InputFeatureCollection> = {
-                    type: 'FeatureCollection',
-                    features
-                };
-
-                if (env.DEBUG) console.log(JSON.stringify(fc));
-
-                await this.submit(fc);
-            }
-
-            const airborne = features.some((feat) => {
-                return (feat.properties.metadata as Static<typeof OutputSchema>).airborne;
-            });
-
-            if (env.POLL_INTERVAL <= 0 || !airborne) break;
-
-            const wait = Math.max(0, env.POLL_INTERVAL * 1000 - (Date.now() - started));
-            if (Date.now() + wait >= deadline) break;
-
-            await new Promise((resolve) => setTimeout(resolve, wait));
-
-            // Docks do not move so are only submitted once per invocation
-            tracked = tracked.filter((entry) => entry.device_class !== 'dock');
-        }
+        await this.submit(fc);
     }
 }
 
