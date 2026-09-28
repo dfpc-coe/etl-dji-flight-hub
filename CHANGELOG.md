@@ -12,11 +12,12 @@
 
 ### Pending Release
 
-- :rocket: Build & push via `cloudtak-etl` so `capabilities.json` is annotated onto the OCI manifest
-- :tada: Add starter `capabilities.json`
-- :arrow_up: Update Github Actions to current versions & run build/test in CI
-
 ### v1.0.0
 
+- :tada: Aircraft, Dock & Remote Controller locations from the DJI FlightHub 2 OpenAPI (Schedule invocation)
+- :tada: Repeated polling within an invocation while an aircraft is airborne
+- :tada: Gimbal orientation submitted as a Sensor FoV
+- :tada: Add `capabilities.json`
+- :white_check_mark: Tests against a mock FlightHub 2 API
 - :rocket: Initial Approach
 

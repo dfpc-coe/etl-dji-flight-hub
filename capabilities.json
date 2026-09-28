@@ -1,0 +1,27 @@
+{
+    "version": "1.0",
+    "name": "DJI FlightHub 2",
+    "description": "Polls the DJI FlightHub 2 OpenAPI for aircraft, dock, and remote controller locations and posts them to the map as Cursor-on-Target.",
+    "compute": {
+        "memory": 512,
+        "timeout": 120
+    },
+    "permissions": [
+        {
+            "resource": "feature:*",
+            "required": true,
+            "description": "DJI FlightHub 2 posts UAS positions to the map"
+        }
+    ],
+    "invocations": {
+        "incoming": {
+            "schedule": {
+                "description": "Polls DJI FlightHub 2 for updated UAS locations on a schedule.",
+                "default": {
+                    "enabled": true,
+                    "schedule": "rate(1 minute)"
+                }
+            }
+        }
+    }
+}
