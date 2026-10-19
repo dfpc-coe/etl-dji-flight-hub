@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import http from 'node:http';
+import { WebSocketServer } from 'ws';
 import type { AddressInfo } from 'node:net';
 import type { Static } from '@sinclair/typebox';
 import type { Feature } from '@tak-ps/etl';
@@ -18,7 +19,31 @@ type Mock = {
     base: string;
     requests: Array<{ url: string; project: string | undefined; request_id: string | undefined }>;
     states: Record<string, unknown>;
+    osd: Array<Record<string, unknown>>;
+    sockets: Array<{ token: string | null; sent: unknown[] }>;
     close: () => Promise<void>;
+};
+
+const RC_SN = '9N9CN3G001313A';
+
+const RC_OSD = {
+    app_version: '', capacity_percent: 80, drc_state: 0, height: 0,
+    latitude: 39.078575, longitude: -108.5374171,
+    wireless_link: { '4g_quality': 65535, link_workmode: 1, sdr_quality: 0 }
+};
+
+const DRONE_OSD = {
+    latitude: 39.0791, longitude: -108.5381, height: 1450.5, elevation: 48,
+    attitude_head: 120, horizontal_speed: 4.2, vertical_speed: 0.5, home_distance: 95,
+    mode_code: 3,
+    battery: { capacity_percent: 61, remain_flight_time: 900, batteries: null },
+    position_state: { gps_number: 14, rtk_number: 0, is_fixed: 0, quality: 5 },
+    cameras: [{
+        payload_index: '88-0-0', camera_mode: 0, zoom_factor: 7,
+        gimbal_yaw: 95, gimbal_pitch: -30, gimbal_roll: 0,
+        measure_target_latitude: 39.0802, measure_target_longitude: -108.5363,
+        measure_target_altitude: 1398.2, measure_target_distance: 213.7, measure_target_error_state: 0
+    }]
 };
 
 const PROJECT_A = '93df839d-ae74-4f04-842e-2f1f81c89a66';
@@ -125,6 +150,12 @@ async function mock(): Promise<Mock> {
         base: '',
         requests: [],
         states: structuredClone(STATES),
+        osd: [
+            { sn: RC_SN, host: RC_OSD, to: ['org', PROJECT_B] },
+            { sn: '1581F7FVC253H00D9BPW', host: DRONE_OSD, to: ['org', PROJECT_B] },
+            { sn: '1581F7FVC253H00D9BPW', host: { latitude: 39.0792, longitude: -108.5382, cameras: [{ payload_index: '88-0-0', gimbal_yaw: 100, measure_target_error_state: 3 }] }, to: ['org', PROJECT_B], delay: 1300 }
+        ],
+        sockets: [],
         close: async () => {}
     };
 
@@ -233,9 +264,48 @@ async function mock(): Promise<Mock> {
         json(404, { code: 404, message: 'not found' });
     });
 
+    const wss = new WebSocketServer({ server, path: '/duplex/web' });
+
+    wss.on('connection', (socket, req) => {
+        const token = new URL(req.url || '/', 'http://localhost').searchParams.get('x-user-token');
+        const record = { token, sent: [] as unknown[] };
+        state.sockets.push(record);
+
+        if (token !== 'org-key') return socket.close(4001, 'unauthorized');
+
+        socket.on('message', (raw) => {
+            const text = String(raw);
+            if (text === 'ping') return socket.send('pong');
+
+            const msg = JSON.parse(text);
+            record.sent.push(msg);
+
+            if (msg.biz_code !== 'biz_scope') return;
+
+            if (!msg.data?.organization) return socket.close(4003);
+
+            socket.send(JSON.stringify({ biz_code: 'biz_scope', conn_id: 'conn', conn_platform: 'web', msg_trace_id: msg.msg_trace_id }));
+            socket.send(JSON.stringify({
+                biz_code: 'manage_member_status', msg_trace_id: 'needs-ack', need_reply: true,
+                to: [PROJECT_B], data: { project_uuid: PROJECT_B, online_status: true }
+            }));
+
+            state.osd.forEach((osd, i) => {
+                setTimeout(() => {
+                    if (socket.readyState !== socket.OPEN) return;
+                    socket.send(JSON.stringify({
+                        version: '', sub_biz_code: '', to_category: 'org_or_prj', biz_code: 'device_osd',
+                        msg_trace_id: `osd-${i}`, to: osd.to, data: { host: osd.host, sn: osd.sn },
+                        timestamp: Date.now(), need_reply: false
+                    }));
+                }, typeof osd.delay === 'number' ? osd.delay : 50 + i * 100);
+            });
+        });
+    });
+
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     state.base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    state.close = () => new Promise((resolve) => server.close(() => resolve()));
+    state.close = () => new Promise((resolve) => { wss.close(); server.close(() => resolve()); });
 
     return state;
 }
@@ -251,6 +321,7 @@ async function run(api: Mock, environment: Record<string, unknown>) {
             environment: {
                 DJI_ORG_KEY: 'org-key',
                 DJI_API_URL: api.base,
+                DJI_WEBSOCKET: false,
                 ...environment
             },
             ephemeral: {}
@@ -439,6 +510,98 @@ test('control - business errors fail the invocation', async () => {
         await assert.rejects(run(api, {
             DJI_ORG_KEY: 'wrong-key'
         }), /FlightHub GET \/project\?page=1&page_size=100 failed \(200\): 200401 X-User-Token is invalid/);
+    } finally {
+        await api.close();
+    }
+});
+
+test('control - streams live telemetry over the web socket', async () => {
+    const api = await mock();
+
+    try {
+        const { submitted } = await run(api, { DJI_WEBSOCKET: true, STREAM_DURATION: 2, STREAM_INTERVAL: 1 });
+
+        assert.equal(api.sockets.length, 1);
+        assert.equal(api.sockets[0].token, 'org-key');
+
+        const subscribe = api.sockets[0].sent.find((m) => (m as { biz_code: string }).biz_code === 'biz_scope') as Record<string, unknown>;
+        assert.ok(subscribe);
+        assert.equal(subscribe.version, '1.0');
+        assert.match(String(subscribe.msg_trace_id), /^[0-9a-f-]{36}$/);
+        assert.deepEqual(subscribe.data, {
+            codes: ['device_osd', 'device_state', 'device_online', 'device_offline', 'device_update_topo'],
+            project: '',
+            organization: 'org'
+        });
+
+        const ack = api.sockets[0].sent.find((m) => (m as { biz_code: string }).biz_code === 'ack_reply') as Record<string, unknown>;
+        assert.deepEqual(ack?.data, { msg_trace_id: 'needs-ack' });
+
+        // The Thing Model snapshot is submitted first, then the stream
+        assert.ok(submitted.length >= 2, `expected a snapshot and a stream submission, got ${submitted.length}`);
+        assert.equal(submitted[0].features.length, 4);
+
+        const live = submitted.slice(1).flatMap((fc) => fc.features);
+        const ids = live.map((f) => f.id);
+        assert.ok(ids.includes(`dji-${RC_SN}`), `controller missing from ${ids}`);
+        assert.ok(ids.includes('dji-1581F7FVC253H00D9BPW'), `aircraft missing from ${ids}`);
+        assert.ok(ids.includes('dji-1581F7FVC253H00D9BPW-rng'), `laser target missing from ${ids}`);
+
+        const rc = live.find((f) => f.id === `dji-${RC_SN}`)!;
+        assert.equal(rc.properties!.type, 'a-f-G-U-C-V-U-R');
+        assert.equal(rc.properties!.callsign, `DJI ${RC_SN}`);
+        assert.deepEqual(rc.geometry.coordinates, [-108.5374171, 39.078575, 0]);
+        assert.equal((rc.properties!.metadata as Record<string, unknown>).project_uuid, PROJECT_B);
+        assert.equal((rc.properties!.metadata as Record<string, unknown>).live, true);
+
+        // The second OSD merges over the first, the laser then reports no signal
+        const drones = live.filter((f) => f.id === 'dji-1581F7FVC253H00D9BPW');
+        assert.equal(drones.length, 2);
+        const [drone, after] = drones;
+        const meta = drone.properties!.metadata as Record<string, unknown>;
+        assert.equal(drone.properties!.type, 'a-f-A-M-H-Q');
+        assert.equal(drone.properties!.callsign, 'Matrice 4E');
+        assert.equal(drone.properties!.course, 120);
+        assert.equal(drone.properties!.speed, 4.2);
+        assert.deepEqual(drone.properties!.sensor, { azimuth: 95, elevation: -30, fov: 45, range: 213.7 });
+        assert.equal(meta.status, 'manual_flight');
+        assert.equal(meta.airborne, true);
+        assert.equal(meta.battery, 61);
+        assert.equal(meta.project, 'Project B');
+        assert.equal(meta.laser_distance, 213.7);
+        assert.match(String(drone.properties!.remarks), /Laser Range: 214m/);
+
+        assert.deepEqual(after.geometry.coordinates, [-108.5382, 39.0792, 1450.5]);
+        assert.deepEqual(after.properties!.sensor, { azimuth: 100, elevation: 0, fov: 45, range: 100 });
+        assert.equal((after.properties!.metadata as Record<string, unknown>).laser_state, undefined);
+        assert.equal(ids.filter((id) => id === 'dji-1581F7FVC253H00D9BPW-rng').length, 1);
+
+        const first = live.find((f) => f.id === 'dji-1581F7FVC253H00D9BPW-rng')!;
+        assert.equal(first.properties!.type, 'b-m-p-s-p-i');
+        assert.equal(first.properties!.callsign, 'Matrice 4E RNG');
+        assert.deepEqual(first.geometry.coordinates, [-108.5363, 39.0802, 1398.2]);
+        const laser = first.properties!.metadata as Record<string, unknown>;
+        assert.equal(laser.device_class, 'laser');
+        assert.equal(laser.laser_distance, 213.7);
+        assert.equal(laser.laser_state, 'normal');
+        assert.equal(laser.project_uuid, PROJECT_B);
+    } finally {
+        await api.close();
+    }
+});
+
+test('control - streaming honours device class filters', async () => {
+    const api = await mock();
+
+    try {
+        const { submitted } = await run(api, {
+            DJI_WEBSOCKET: true, STREAM_DURATION: 1, STREAM_INTERVAL: 1,
+            INCLUDE_CONTROLLERS: false, INCLUDE_DOCKS: false
+        });
+
+        const live = submitted.slice(1).flatMap((fc) => fc.features).map((f) => f.id);
+        assert.ok(!live.includes(`dji-${RC_SN}`));
+        assert.ok(live.includes('dji-1581F7FVC253H00D9BPW'));
     } finally {
         await api.close();
     }

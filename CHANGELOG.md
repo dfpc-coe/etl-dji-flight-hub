@@ -12,6 +12,14 @@
 
 ### Pending Release
 
+### v1.5.0
+
+- :tada: Stream live telemetry from the FlightHub 2 web socket for the remainder of each invocation
+- :tada: Submit the Laser Range Finder target as a Sensor Point of Interest and use its distance as the sensor range
+- :rocket: Read gimbal angles from the Cloud API `cameras` telemetry
+- :rocket: Default schedule is now `rate(1 minute)` to pair with a 50 second stream
+- :white_check_mark: Mock the web socket in the control tests
+
 ### v1.4.0
 
 - :rocket: Version Sync

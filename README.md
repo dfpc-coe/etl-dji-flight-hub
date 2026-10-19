@@ -3,7 +3,8 @@
 <p align='center'>DJI FlightHub 2 UAS location tracking for CloudTAK</p>
 
 Polls the [DJI FlightHub 2](https://fh.dji.com) OpenAPI for the location of aircraft, docks and remote
-controllers and submits them to TAK as Cursor-on-Target.
+controllers, then streams their live telemetry (including the Laser Range Finder target) from the
+FlightHub 2 web socket, and submits them to TAK as Cursor-on-Target.
 
 ## Architecture
 
@@ -25,17 +26,42 @@ only returned by the Organization scope list in step 3, where they occupy the `g
 with no `drone`. The Organization list does not say which Project a device belongs to, so step 4 probes
 each Project in turn until one accepts the serial number.
 
-The default schedule is `rate(10 seconds)` so that a moving aircraft produces a usable track. Every
-invocation makes `3 + <projects> + <online devices>` requests plus up to `<projects>` requests for each
-device that is not paired with a Dock. Setting `DJI_PROJECTS` does not remove the Project list request,
-as it is the source of the Project names, but does limit the device list & Project lookup requests.
-
-Sub-minute schedules are run by the CloudTAK events pool rather than AWS EventBridge. Invocations are
-not queued behind one another, so the schedule should be lengthened if an invocation regularly takes
-longer than the schedule interval.
+Every invocation makes `3 + <projects> + <online devices>` requests plus up to `<projects>` requests for
+each device that is not paired with a Dock. Setting `DJI_PROJECTS` does not remove the Project list
+request, as it is the source of the Project names, but does limit the device list & Project lookup
+requests.
 
 A failure to list the Projects fails the invocation. A failure for a single Project or device is logged
 and the remaining devices are still submitted.
+
+### Live Telemetry Stream
+
+The Thing Model is a snapshot and omits the payload telemetry (gimbal angles, Laser Range Finder) that
+only exists in the DJI Cloud API OSD stream. The FlightHub 2 web UI receives that stream over a web
+socket at `/duplex/web` on the same host as the OpenAPI, and the socket accepts the Organization Key.
+This channel is not documented by DJI - it was derived from the FlightHub 2 web application and may
+change without notice.
+
+With `DJI_WEBSOCKET` enabled (the default), each invocation submits the Thing Model snapshot and then
+holds the socket open for `STREAM_DURATION` seconds, submitting every device whose telemetry changed
+each `STREAM_INTERVAL` seconds. The default schedule is therefore `rate(1 minute)` with a 50 second
+stream, which leaves a few seconds between invocations; `STREAM_DURATION` must stay below both the
+schedule interval and the Layer timeout (60 seconds for a 1 minute schedule is sufficient).
+
+| Step | Message | Purpose |
+| ---- | ------- | ------- |
+| 1 | `wss://<host>/duplex/web?x-user-token=<Organization Key>` | Authenticate the socket |
+| 2 | `{ "biz_code": "biz_scope", "version": "1.0", "timestamp", "msg_trace_id", "data": { "codes": [...], "project": "", "organization": "<uuid>" } }` | Subscribe to the Organization's `device_osd`, `device_state`, `device_online`, `device_offline` & `device_update_topo` messages. `organization` is mandatory, without it the server closes with code 4003 |
+| 3 | `{ "biz_code": "device_osd", "to": ["<org>", "<project>"], "data": { "sn", "host": { ... } } }` | Received at ~2 Hz per online device. `host` is the Cloud API OSD object for that device |
+| 4 | `ping` / `pong` | Keepalive text frames. Messages flagged `need_reply` are answered with an `ack_reply` carrying their `msg_trace_id` |
+
+The Organization UUID is read from the `organization_uuid` claim of the Organization Key, falling back
+to the `org_uuid` of the first Project. Devices that only appear on the stream (Remote Controllers are
+not returned by any OpenAPI device list) are classified by the shape of their OSD and attributed to the
+Project named in the message's `to` list.
+
+The stream is a near real-time feed with no history, so a device that is offline for the whole
+invocation produces nothing from it. The Thing Model snapshot still covers those devices.
 
 ### Feature Mapping
 
@@ -44,6 +70,7 @@ and the remaining devices are still submitted.
 | Aircraft | `a-f-A-M-H-Q` | Device alias, otherwise `<gateway alias> <model>` |
 | Dock | `a-f-G-I-B-A` | Device alias, otherwise `<model> <serial>` |
 | Remote Controller | `a-f-G-U-C-V-U-R` | Device alias, otherwise `<model> <serial>` |
+| Laser Range Finder target | `b-m-p-s-p-i` (Sensor Point of Interest) | `<aircraft callsign> RNG`, uid `dji-<serial>-rng` |
 
 | CoT | Thing Model Property | Notes |
 | --- | -------------------- | ----- |
@@ -51,7 +78,8 @@ and the remaining devices are still submitted.
 | Point | `longitude`, `latitude`, `height` | `height` is relative to the ellipsoid, matching CoT HAE. Devices reporting `0,0` have no position fix and are skipped |
 | `course` | `attitude_head` | Aircraft only. Published as -180 to 180 from true north, normalized to 0 to 360 |
 | `speed` | `horizontal_speed` | Aircraft only. m/s |
-| `sensor` | `<payload index>.gimbal_yaw`, `gimbal_pitch` | Airborne aircraft only. FoV (45) & range (100m) are constants as neither is published |
+| `sensor` | `cameras[].gimbal_yaw`, `gimbal_pitch` (stream) or `<payload index>.gimbal_yaw` (Thing Model) | Airborne aircraft only. FoV is a constant (45). Range is the Laser Range Finder distance when it is measuring, otherwise 100m |
+| Laser target Point | `cameras[].measure_target_longitude`, `measure_target_latitude`, `measure_target_altitude` | Stream only. Emitted while `measure_target_error_state` is normal and the target has a position. The distance is also added to the aircraft remarks & metadata |
 
 Status, battery, height above takeoff, satellite counts and the owning Project are included in the remarks
 and in the feature metadata.
@@ -67,6 +95,9 @@ and in the feature metadata.
 | `INCLUDE_DOCKS` | Submit Dock locations (default `true`) |
 | `INCLUDE_CONTROLLERS` | Submit Remote Controller locations, which is the location of the pilot (default `true`) |
 | `INCLUDE_OFFLINE` | Also request the state of devices reported as offline (default `false`) |
+| `DJI_WEBSOCKET` | Stream live telemetry from the FlightHub 2 web socket after the Thing Model snapshot (default `true`). See [Live Telemetry Stream](#live-telemetry-stream) |
+| `STREAM_DURATION` | Seconds to hold the stream open per invocation (default `50`) |
+| `STREAM_INTERVAL` | Seconds between live submissions (default `2`) |
 | `DEBUG` | Print submitted features in the logs |
 
 The Organization Key is a JWT tied to the user that generated it. That user must be a member of each

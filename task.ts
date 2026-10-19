@@ -41,6 +41,20 @@ const InputSchema = Type.Object({
         default: false,
         description: 'Request the last known state of devices that FlightHub 2 reports as offline'
     }),
+    'DJI_WEBSOCKET': Type.Boolean({
+        default: true,
+        description: 'After the Thing Model snapshot, hold the FlightHub 2 web socket open and submit live telemetry as it arrives'
+    }),
+    'STREAM_DURATION': Type.Integer({
+        default: 50,
+        minimum: 1,
+        description: 'Seconds to stream live telemetry per invocation - keep below the Layer timeout and the schedule interval'
+    }),
+    'STREAM_INTERVAL': Type.Integer({
+        default: 2,
+        minimum: 1,
+        description: 'Seconds between live telemetry submissions'
+    }),
     'DEBUG': Type.Boolean({
         default: false,
         description: 'Print results in logs'
@@ -53,7 +67,7 @@ const InputSchema = Type.Object({
  */
 const OutputSchema = Type.Object({
     serial: Type.String({ description: 'Device Serial Number' }),
-    device_class: Type.String({ description: 'drone, dock or controller' }),
+    device_class: Type.String({ description: 'drone, dock, controller or laser' }),
     model: Type.Optional(Type.String({ description: 'Device Model - ie M3TD' })),
     model_key: Type.Optional(Type.String({ description: 'DJI Device Enum: domain-type-sub_type' })),
     project: Type.Optional(Type.String({ description: 'FlightHub 2 Project Name' })),
@@ -72,12 +86,19 @@ const OutputSchema = Type.Object({
     gps_satellites: Type.Optional(Type.Number({ description: 'Number of GPS satellites' })),
     rtk_satellites: Type.Optional(Type.Number({ description: 'Number of RTK satellites' })),
     drone_in_dock: Type.Optional(Type.Boolean({ description: 'Dock reports that the aircraft is inside' })),
-    firmware_version: Type.Optional(Type.String({ description: 'Firmware Version' }))
+    firmware_version: Type.Optional(Type.String({ description: 'Firmware Version' })),
+    laser_latitude: Type.Optional(Type.Number({ description: 'Laser Range Finder target latitude' })),
+    laser_longitude: Type.Optional(Type.Number({ description: 'Laser Range Finder target longitude' })),
+    laser_altitude: Type.Optional(Type.Number({ description: 'Laser Range Finder target altitude in meters' })),
+    laser_distance: Type.Optional(Type.Number({ description: 'Laser Range Finder distance in meters' })),
+    laser_state: Type.Optional(Type.String({ description: 'Laser Range Finder state - normal, too_close, too_far or no_signal' })),
+    live: Type.Optional(Type.Boolean({ description: 'Position came from the live telemetry stream rather than the Thing Model' }))
 });
 
 const Project = Type.Object({
     uuid: Type.String(),
-    name: Type.Optional(Type.String())
+    name: Type.Optional(Type.String()),
+    org_uuid: Type.Optional(Type.String())
 }, { additionalProperties: true });
 
 const Device = Type.Object({
@@ -102,7 +123,19 @@ const DevicePair = Type.Object({
  * Subset of the Thing Model shared by Aircraft, Docks & Remote Controllers
  * The payload gimbals are keyed by payload index so unknown properties are retained
  */
+const Camera = Type.Object({
+    payload_index: Type.Optional(Type.String()),
+    gimbal_yaw: Type.Optional(Type.Number()),
+    gimbal_pitch: Type.Optional(Type.Number()),
+    measure_target_latitude: Type.Optional(Type.Number()),
+    measure_target_longitude: Type.Optional(Type.Number()),
+    measure_target_altitude: Type.Optional(Type.Number()),
+    measure_target_distance: Type.Optional(Type.Number()),
+    measure_target_error_state: Type.Optional(Type.Union([Type.Integer(), Type.String()]))
+}, { additionalProperties: true });
+
 const DeviceState = Type.Object({
+    cameras: Type.Optional(Type.Array(Camera)),
     latitude: Type.Optional(Type.Number()),
     longitude: Type.Optional(Type.Number()),
     height: Type.Optional(Type.Number()),
@@ -143,6 +176,11 @@ const CoTType: Record<DeviceClass, string> = {
     dock: 'a-f-G-I-B-A',
     controller: 'a-f-G-U-C-V-U-R'
 };
+
+// Sensor Point of Interest
+const LaserCoTType = 'b-m-p-s-p-i';
+
+const LaserStates = ['normal', 'too_close', 'too_far', 'no_signal'];
 
 // The device lists report mode_code as an integer while the Thing Model reports the named value
 const DroneModes = [
@@ -210,7 +248,53 @@ function compass(degrees: number): number {
     return ((degrees % 360) + 360) % 360;
 }
 
+function validPosition(latitude?: number, longitude?: number): boolean {
+    if (latitude === undefined || longitude === undefined) return false;
+    // Devices without a position fix report 0,0
+    if (latitude === 0 && longitude === 0) return false;
+    return Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180;
+}
+
+function laser(state: Static<typeof DeviceState>): {
+    latitude: number,
+    longitude: number,
+    altitude?: number,
+    distance?: number,
+    state: string
+} | undefined {
+    for (const camera of state.cameras || []) {
+        if (!validPosition(camera.measure_target_latitude, camera.measure_target_longitude)) continue;
+
+        const code = camera.measure_target_error_state;
+        const index = Number(code ?? 0);
+        const status = Number.isNaN(index)
+            ? String(code).toLowerCase()
+            : LaserStates[index] || String(code);
+
+        if (status !== 'normal') continue;
+
+        return {
+            latitude: camera.measure_target_latitude as number,
+            longitude: camera.measure_target_longitude as number,
+            altitude: camera.measure_target_altitude,
+            distance: camera.measure_target_distance,
+            state: status
+        };
+    }
+
+    return undefined;
+}
+
 function gimbal(state: Static<typeof DeviceState>): { yaw: number, pitch: number } | undefined {
+    for (const camera of state.cameras || []) {
+        if (typeof camera.gimbal_yaw !== 'number') continue;
+
+        return {
+            yaw: camera.gimbal_yaw,
+            pitch: typeof camera.gimbal_pitch === 'number' ? camera.gimbal_pitch : 0
+        };
+    }
+
     for (const [key, value] of Object.entries(state)) {
         if (!/^\d+-\d+-\d+$/.test(key) || !value || typeof value !== 'object') continue;
 
@@ -226,16 +310,14 @@ function gimbal(state: Static<typeof DeviceState>): { yaw: number, pitch: number
     return undefined;
 }
 
-function stateToFeature(
+function stateToFeatures(
     tracked: Tracked,
-    state: Static<typeof DeviceState>
-): Static<typeof Feature.InputFeature> | null {
+    state: Static<typeof DeviceState>,
+    live = false
+): Static<typeof Feature.InputFeature>[] {
     const { device, device_class, gateway, project } = tracked;
 
-    if (state.latitude === undefined || state.longitude === undefined) return null;
-    // Devices without a position fix report 0,0
-    if (state.latitude === 0 && state.longitude === 0) return null;
-    if (Math.abs(state.latitude) > 90 || Math.abs(state.longitude) > 180) return null;
+    if (!validPosition(state.latitude, state.longitude)) return [];
 
     const model = device.device_model?.name;
     const status = modeName(device_class, state.mode_code ?? device.mode_code);
@@ -264,6 +346,9 @@ function stateToFeature(
     }
     if (project.name) remarks.push(`Project: ${project.name}`);
 
+    const target = device_class === 'drone' ? laser(state) : undefined;
+    if (target?.distance !== undefined) remarks.push(`Laser Range: ${Math.round(target.distance)}m`);
+
     const metadata: Static<typeof OutputSchema> = {
         serial: device.sn,
         device_class,
@@ -287,7 +372,13 @@ function stateToFeature(
         drone_in_dock: state.drone_in_dock !== undefined
             ? ['inside', '1'].includes(String(state.drone_in_dock))
             : undefined,
-        firmware_version: state.firmware_version
+        firmware_version: state.firmware_version,
+        laser_latitude: target?.latitude,
+        laser_longitude: target?.longitude,
+        laser_altitude: target?.altitude,
+        laser_distance: target?.distance,
+        laser_state: target?.state,
+        live: live || undefined
     };
 
     const feat: Static<typeof Feature.InputFeature> = {
@@ -301,9 +392,44 @@ function stateToFeature(
         },
         geometry: {
             type: 'Point',
-            coordinates: [state.longitude, state.latitude, state.height ?? 0]
+            coordinates: [state.longitude as number, state.latitude as number, state.height ?? 0]
         }
     };
+
+    const features = [feat];
+
+    if (target) {
+        features.push({
+            id: `dji-${device.sn}-rng`,
+            type: 'Feature',
+            properties: {
+                type: LaserCoTType,
+                callsign: `${callsign} RNG`,
+                remarks: [
+                    `Laser Range Finder target of ${callsign}`,
+                    target.distance !== undefined ? `Distance: ${Math.round(target.distance)}m` : undefined,
+                    project.name ? `Project: ${project.name}` : undefined
+                ].filter(Boolean).join('\n'),
+                metadata: {
+                    serial: device.sn,
+                    device_class: 'laser',
+                    model,
+                    project: project.name,
+                    project_uuid: project.uuid,
+                    laser_latitude: target.latitude,
+                    laser_longitude: target.longitude,
+                    laser_altitude: target.altitude,
+                    laser_distance: target.distance,
+                    laser_state: target.state,
+                    live: live || undefined
+                } satisfies Static<typeof OutputSchema>
+            },
+            geometry: {
+                type: 'Point',
+                coordinates: [target.longitude, target.latitude, target.altitude ?? 0]
+            }
+        });
+    }
 
     if (device_class === 'drone') {
         if (state.horizontal_speed !== undefined) feat.properties.speed = state.horizontal_speed;
@@ -316,12 +442,28 @@ function stateToFeature(
                 azimuth: compass(payload.yaw),
                 elevation: payload.pitch,
                 fov: 45,
-                range: 100
+                range: target?.distance ?? 100
             };
         }
     }
 
-    return feat;
+    return features;
+}
+
+/**
+ * Devices only seen on the telemetry stream are classified by the shape of their OSD
+ */
+function inferTracked(sn: string, state: Static<typeof DeviceState>, project?: Static<typeof Project>): Tracked {
+    const keys = new Set(Object.keys(state));
+
+    let device_class: DeviceClass = 'controller';
+    if (['attitude_head', 'cameras', 'home_distance', 'total_flight_sorties'].some((key) => keys.has(key))) {
+        device_class = 'drone';
+    } else if (['drone_in_dock', 'network_state', 'sub_device', 'cover_state'].some((key) => keys.has(key))) {
+        device_class = 'dock';
+    }
+
+    return { device_class, device: { sn }, project: project || { uuid: '' } };
 }
 
 export default class Task extends ETL {
@@ -329,7 +471,7 @@ export default class Task extends ETL {
     static flow = [ DataFlowType.Incoming ];
     static invocation = [ InvocationType.Schedule ];
     static invocationDefaults = {
-        schedule: { enabled: true, cron: 'rate(10 seconds)' }
+        schedule: { enabled: true, cron: 'rate(1 minute)' }
     };
 
     async schema(
@@ -519,9 +661,173 @@ export default class Task extends ETL {
             }
         }
 
-        return Array.from(tracked.values()).filter((entry) => {
-            return env.INCLUDE_OFFLINE || entry.device.device_online_status;
+        return Array.from(tracked.values());
+    }
+
+    included(env: Static<typeof InputSchema>, entry: Tracked): boolean {
+        if (entry.device_class === 'dock' && !env.INCLUDE_DOCKS) return false;
+        if (entry.device_class === 'controller' && !env.INCLUDE_CONTROLLERS) return false;
+        return true;
+    }
+
+    organization(env: Static<typeof InputSchema>, projects: Static<typeof Project>[]): string {
+        try {
+            const claims = JSON.parse(Buffer.from(env.DJI_ORG_KEY.split('.')[1], 'base64url').toString());
+            if (typeof claims.organization_uuid === 'string' && claims.organization_uuid) return claims.organization_uuid;
+        } catch {
+            // Not a JWT
+        }
+
+        for (const project of projects) {
+            if (project.org_uuid) return project.org_uuid;
+        }
+
+        throw new Error('Unable to determine the FlightHub Organization UUID');
+    }
+
+    /**
+     * Subscribe to the FlightHub 2 web socket used by its own UI and submit
+     * Cloud API OSD telemetry as it arrives until the stream duration elapses
+     */
+    async stream(
+        env: Static<typeof InputSchema>,
+        projects: Static<typeof Project>[],
+        known: Map<string, Tracked>
+    ): Promise<void> {
+        const url = new URL('/duplex/web', env.DJI_API_URL);
+        url.protocol = url.protocol === 'http:' ? 'ws:' : 'wss:';
+        url.searchParams.set('x-user-token', env.DJI_ORG_KEY);
+
+        const organization = this.organization(env, projects);
+        const byProject = new Map(projects.map((project) => [project.uuid, project]));
+
+        const latest: Map<string, Static<typeof DeviceState>> = new Map();
+        const projectOf: Map<string, Static<typeof Project>> = new Map();
+        const dirty: Set<string> = new Set();
+        let received = 0;
+        let flushing = false;
+
+        const ws = new WebSocket(url);
+
+        const send = (message: Record<string, unknown>) => {
+            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+        };
+
+        const flush = async () => {
+            if (flushing || !dirty.size) return;
+            flushing = true;
+
+            try {
+                const features: Static<typeof Feature.InputFeature>[] = [];
+
+                for (const sn of dirty) {
+                    const state = latest.get(sn);
+                    if (!state) continue;
+
+                    const tracked = known.get(sn) || inferTracked(sn, state, projectOf.get(sn));
+                    if (!this.included(env, tracked)) continue;
+
+                    features.push(...stateToFeatures(tracked, state, true));
+                }
+
+                dirty.clear();
+
+                if (features.length) {
+                    const fc: Static<typeof Feature.InputFeatureCollection> = { type: 'FeatureCollection', features };
+                    if (env.DEBUG) console.log(JSON.stringify(fc));
+                    await this.submit(fc);
+                }
+            } catch (err) {
+                console.error('not ok - stream submit:', err instanceof Error ? err.message : err);
+            } finally {
+                flushing = false;
+            }
+        };
+
+        await new Promise<void>((resolve) => {
+            const timers: NodeJS.Timeout[] = [];
+            let finished = false;
+
+            const finish = () => {
+                if (finished) return;
+                finished = true;
+                for (const timer of timers) clearInterval(timer);
+                clearTimeout(deadline);
+                try { ws.close(); } catch { /* already closed */ }
+                resolve();
+            };
+
+            const deadline = setTimeout(finish, env.STREAM_DURATION * 1000);
+
+            ws.addEventListener('open', () => {
+                send({
+                    biz_code: 'biz_scope',
+                    version: '1.0',
+                    timestamp: Date.now(),
+                    msg_trace_id: crypto.randomUUID(),
+                    data: {
+                        codes: ['device_osd', 'device_state', 'device_online', 'device_offline', 'device_update_topo'],
+                        project: '',
+                        organization
+                    }
+                });
+
+                timers.push(setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send('ping'); }, 15000));
+                timers.push(setInterval(() => { flush(); }, env.STREAM_INTERVAL * 1000));
+            });
+
+            ws.addEventListener('message', (event) => {
+                let message: {
+                    biz_code?: unknown,
+                    msg_trace_id?: unknown,
+                    need_reply?: unknown,
+                    to?: unknown,
+                    data?: { sn?: unknown, host?: unknown }
+                };
+
+                try {
+                    message = JSON.parse(String(event.data));
+                } catch {
+                    return;
+                }
+
+                if (message.need_reply && message.msg_trace_id) {
+                    send({ biz_code: 'ack_reply', timestamp: Date.now(), data: { msg_trace_id: message.msg_trace_id } });
+                }
+
+                if (message.biz_code !== 'device_osd' || typeof message.data?.sn !== 'string' || !message.data.host) return;
+
+                received++;
+
+                const sn = message.data.sn;
+
+                try {
+                    const host = stripNulls(message.data.host) as Record<string, unknown>;
+                    latest.set(sn, this.type(DeviceState, { ...(latest.get(sn) || {}), ...host }));
+                } catch (err) {
+                    if (env.DEBUG) console.log(`ok - ${sn} telemetry rejected: ${err instanceof Error ? err.message : err}`);
+                    return;
+                }
+
+                for (const uuid of Array.isArray(message.to) ? message.to : []) {
+                    const project = byProject.get(String(uuid));
+                    if (project) projectOf.set(sn, project);
+                }
+
+                dirty.add(sn);
+            });
+
+            ws.addEventListener('error', () => {
+                console.error('not ok - websocket error');
+            });
+
+            ws.addEventListener('close', (event) => {
+                console.log(`ok - websocket closed (${event.code}) after ${received} telemetry messages`);
+                finish();
+            });
         });
+
+        await flush();
     }
 
     async features(
@@ -541,10 +847,10 @@ export default class Task extends ETL {
                         entry.project.uuid
                     );
 
-                    const feat = data.device_state ? stateToFeature(entry, data.device_state) : null;
+                    const feats = data.device_state ? stateToFeatures(entry, data.device_state) : [];
 
-                    if (feat) {
-                        features.push(feat);
+                    if (feats.length) {
+                        features.push(...feats);
                     } else if (env.DEBUG) {
                         console.log(`ok - ${entry.device.sn} did not report a location`);
                     }
@@ -563,20 +869,26 @@ export default class Task extends ETL {
         const projects = await this.projects(env);
         console.log(`ok - found ${projects.length} projects`);
 
-        const tracked = await this.devices(env, projects);
-        console.log(`ok - found ${tracked.length} devices`);
+        const devices = await this.devices(env, projects);
+        const tracked = devices.filter((entry) => env.INCLUDE_OFFLINE || entry.device.device_online_status);
+        console.log(`ok - found ${devices.length} devices (${tracked.length} polled)`);
 
         const features = await this.features(env, tracked);
-        if (!features.length) return;
 
-        const fc: Static<typeof Feature.InputFeatureCollection> = {
-            type: 'FeatureCollection',
-            features
-        };
+        if (features.length) {
+            const fc: Static<typeof Feature.InputFeatureCollection> = {
+                type: 'FeatureCollection',
+                features
+            };
 
-        if (env.DEBUG) console.log(JSON.stringify(fc));
+            if (env.DEBUG) console.log(JSON.stringify(fc));
 
-        await this.submit(fc);
+            await this.submit(fc);
+        }
+
+        if (env.DJI_WEBSOCKET) {
+            await this.stream(env, projects, new Map(devices.map((entry) => [entry.device.sn, entry])));
+        }
     }
 }
 

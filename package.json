@@ -2,7 +2,7 @@
     "name": "etl-dji-flight-hub",
     "type": "module",
     "private": true,
-    "version": "1.4.0",
+    "version": "1.5.0",
     "description": "DJI FlightHub 2 UAS location tracking for CloudTAK",
     "main": "task.ts",
     "scripts": {
@@ -17,10 +17,12 @@
     },
     "devDependencies": {
         "@eslint/js": "^10.0.0",
+        "@types/ws": "^8.18.2",
         "eslint": "^10.0.0",
         "tsx": "^4.23.12",
         "typescript": "^6.0.0",
-        "typescript-eslint": "^8.0.0"
+        "typescript-eslint": "^8.0.0",
+        "ws": "^8.22.0"
     },
     "dependencies": {
         "@sinclair/typebox": "^0.34.0",
