@@ -12,6 +12,13 @@
 
 ### Pending Release
 
+### v1.7.0
+
+- :tada: Submit the map pins, lines & polygons of each Project - including those dropped in Pilot 2 on a Remote Controller - from the Cloud API `GET /map/api/v1/workspaces/{project_uuid}/element-groups` route, which accepts the Organization Key
+- :tada: `INCLUDE_PINS` & `PINS_DISTRIBUTED_ONLY` inputs
+- :pencil2: Document the map element groups, element record & CoT mapping; writes via `POST`/`PUT`/`DELETE /openapi/v2.0/map/element` are documented but not implemented
+- :white_check_mark: Mock the element group route in the control tests
+
 ### v1.6.1
 
 - :bug: Read the gimbal & Laser Range Finder from the payload index keyed OSD object (`88-0-0`), the `cameras` array only carries camera settings

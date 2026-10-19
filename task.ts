@@ -41,6 +41,14 @@ const InputSchema = Type.Object({
         default: false,
         description: 'Request the last known state of devices that FlightHub 2 reports as offline'
     }),
+    'INCLUDE_PINS': Type.Boolean({
+        default: true,
+        description: 'Submit the map pins, lines & polygons of each Project - including those dropped on a Remote Controller'
+    }),
+    'PINS_DISTRIBUTED_ONLY': Type.Boolean({
+        default: false,
+        description: 'Only submit pins from element groups that are distributed to Remote Controllers (App Shared & dji_app), skipping the Default group'
+    }),
     'DJI_WEBSOCKET': Type.Boolean({
         default: true,
         description: 'After the Thing Model snapshot, hold the FlightHub 2 web socket open and submit live telemetry as it arrives'
@@ -66,8 +74,8 @@ const InputSchema = Type.Object({
  * GeoJSON Feature in the .properties.metdata object
  */
 const OutputSchema = Type.Object({
-    serial: Type.String({ description: 'Device Serial Number' }),
-    device_class: Type.String({ description: 'drone, dock, controller or laser' }),
+    serial: Type.Optional(Type.String({ description: 'Device Serial Number' })),
+    device_class: Type.String({ description: 'drone, dock, controller, laser or pin' }),
     model: Type.Optional(Type.String({ description: 'Device Model - ie M3TD' })),
     model_key: Type.Optional(Type.String({ description: 'DJI Device Enum: domain-type-sub_type' })),
     project: Type.Optional(Type.String({ description: 'FlightHub 2 Project Name' })),
@@ -92,8 +100,56 @@ const OutputSchema = Type.Object({
     laser_altitude: Type.Optional(Type.Number({ description: 'Laser Range Finder target altitude in meters' })),
     laser_distance: Type.Optional(Type.Number({ description: 'Laser Range Finder distance in meters' })),
     laser_state: Type.Optional(Type.String({ description: 'Laser Range Finder state - normal, too_close, too_far or no_signal' })),
-    live: Type.Optional(Type.Boolean({ description: 'Position came from the live telemetry stream rather than the Thing Model' }))
+    live: Type.Optional(Type.Boolean({ description: 'Position came from the live telemetry stream rather than the Thing Model' })),
+    element_id: Type.Optional(Type.String({ description: 'FlightHub 2 map element UUID' })),
+    element_type: Type.Optional(Type.String({ description: 'point, line or polygon' })),
+    group: Type.Optional(Type.String({ description: 'Map element group name' })),
+    group_type: Type.Optional(Type.String({ description: 'default, app_shared, custom or the numeric group type' })),
+    author: Type.Optional(Type.String({ description: 'FlightHub 2 user that created the element' })),
+    color: Type.Optional(Type.String({ description: 'Element colour as a hex string' })),
+    created: Type.Optional(Type.String({ description: 'Element creation time' })),
+    updated: Type.Optional(Type.String({ description: 'Element last update time' }))
 });
+
+const MapElement = Type.Object({
+    id: Type.String(),
+    name: Type.Optional(Type.String()),
+    desc: Type.Optional(Type.String()),
+    status: Type.Optional(Type.Union([Type.Integer(), Type.String()])),
+    display: Type.Optional(Type.Union([Type.Integer(), Type.String()])),
+    create_time: Type.Optional(Type.Number()),
+    update_time: Type.Optional(Type.Number()),
+    resource: Type.Optional(Type.Object({
+        type: Type.Optional(Type.Union([Type.Integer(), Type.String()])),
+        user_name: Type.Optional(Type.String()),
+        user_id: Type.Optional(Type.String()),
+        remark: Type.Optional(Type.String()),
+        content: Type.Optional(Type.Object({
+            properties: Type.Optional(Type.Object({
+                color: Type.Optional(Type.String()),
+                clampToGround: Type.Optional(Type.Boolean())
+            }, { additionalProperties: true })),
+            geometry: Type.Optional(Type.Object({
+                type: Type.Optional(Type.String()),
+                coordinates: Type.Optional(Type.Unknown())
+            }, { additionalProperties: true }))
+        }, { additionalProperties: true }))
+    }, { additionalProperties: true }))
+}, { additionalProperties: true });
+
+const MapElementGroup = Type.Object({
+    id: Type.String(),
+    name: Type.Optional(Type.String()),
+    type: Type.Optional(Type.Union([Type.Integer(), Type.String()])),
+    is_distributed: Type.Optional(Type.Boolean()),
+    elements: Type.Optional(Type.Array(MapElement))
+}, { additionalProperties: true });
+
+const GroupTypes: Record<string, string> = {
+    '0': 'custom',
+    '1': 'default',
+    '2': 'app_shared'
+};
 
 const Project = Type.Object({
     uuid: Type.String(),
@@ -453,6 +509,106 @@ function stateToFeatures(
     return features;
 }
 
+type Position = [number, number] | [number, number, number];
+
+function isPosition(value: unknown): value is Position {
+    return Array.isArray(value)
+        && (value.length === 2 || value.length === 3)
+        && value.every((entry) => typeof entry === 'number' && Number.isFinite(entry))
+        && validPosition(value[1], value[0]);
+}
+
+/**
+ * Pilot 2 polygons have been seen both as a bare ring & as a GeoJSON ring list
+ */
+function elementGeometry(type: string | undefined, coordinates: unknown): Static<typeof Feature.InputFeature>['geometry'] | null {
+    if (type === 'Point') {
+        return isPosition(coordinates) ? { type: 'Point', coordinates } : null;
+    } else if (type === 'LineString') {
+        if (!Array.isArray(coordinates) || coordinates.length < 2 || !coordinates.every(isPosition)) return null;
+        return { type: 'LineString', coordinates };
+    } else if (type === 'Polygon') {
+        if (!Array.isArray(coordinates) || !coordinates.length) return null;
+
+        const rings = isPosition(coordinates[0]) ? [coordinates] : coordinates;
+        if (!rings.every((ring) => Array.isArray(ring) && ring.length >= 3 && ring.every(isPosition))) return null;
+
+        const closed = (rings as Position[][]).map((ring) => {
+            const first = ring[0];
+            const last = ring[ring.length - 1];
+            return first[0] === last[0] && first[1] === last[1] ? ring : [...ring, first];
+        });
+
+        return { type: 'Polygon', coordinates: closed };
+    }
+
+    return null;
+}
+
+function elementToFeature(
+    element: Static<typeof MapElement>,
+    group: Static<typeof MapElementGroup>,
+    project: Static<typeof Project>
+): Static<typeof Feature.InputFeature> | null {
+    const content = element.resource?.content;
+    const geometry = elementGeometry(content?.geometry?.type, content?.geometry?.coordinates);
+    if (!geometry) return null;
+
+    const element_type = geometry.type === 'Point' ? 'point' : geometry.type === 'LineString' ? 'line' : 'polygon';
+    const color = content?.properties?.color;
+    const author = element.resource?.user_name;
+    const callsign = element.name || `DJI ${element_type} ${element.id.slice(0, 8)}`;
+
+    const remarks = [];
+    if (element.desc) remarks.push(element.desc);
+    if (element.resource?.remark) remarks.push(element.resource.remark);
+    if (author) remarks.push(`Created by: ${author}`);
+    if (group.name) remarks.push(`Layer: ${group.name}`);
+    if (project.name) remarks.push(`Project: ${project.name}`);
+
+    const metadata: Static<typeof OutputSchema> = {
+        device_class: 'pin',
+        element_id: element.id,
+        element_type,
+        group: group.name,
+        group_type: group.type !== undefined ? GroupTypes[String(group.type)] || String(group.type) : undefined,
+        author,
+        color,
+        project: project.name,
+        project_uuid: project.uuid,
+        created: element.create_time ? new Date(element.create_time).toISOString() : undefined,
+        updated: element.update_time ? new Date(element.update_time).toISOString() : undefined
+    };
+
+    const feat: Static<typeof Feature.InputFeature> = {
+        id: `dji-pin-${element.id}`,
+        type: 'Feature',
+        properties: {
+            type: geometry.type === 'Point' ? 'u-d-p' : 'u-d-f',
+            callsign,
+            remarks: remarks.join('\n'),
+            metadata
+        },
+        geometry
+    };
+
+    if (color) {
+        if (geometry.type === 'Point') {
+            feat.properties['marker-color'] = color;
+        } else {
+            feat.properties.stroke = color;
+            feat.properties['stroke-width'] = 3;
+
+            if (geometry.type === 'Polygon') {
+                feat.properties.fill = color;
+                feat.properties['fill-opacity'] = 0.2;
+            }
+        }
+    }
+
+    return feat;
+}
+
 /**
  * Devices only seen on the telemetry stream are classified by the shape of their OSD
  */
@@ -502,7 +658,9 @@ export default class Task extends ETL {
         schema: T,
         project?: string
     ): Promise<Static<T>> {
-        const url = new URL(`${env.DJI_API_URL.replace(/\/+$/, '')}/openapi/${env.DJI_API_VERSION}${path}`);
+        // Paths outside the OpenAPI prefix are used verbatim - ie the Cloud API map element routes
+        const prefix = path.startsWith('/map/') ? '' : `/openapi/${env.DJI_API_VERSION}`;
+        const url = new URL(`${env.DJI_API_URL.replace(/\/+$/, '')}${prefix}${path}`);
 
         const headers: Record<string, string> = {
             'X-User-Token': env.DJI_ORG_KEY,
@@ -535,6 +693,45 @@ export default class Task extends ETL {
         }
 
         return this.type(schema, stripNulls(envelope.data ?? {}));
+    }
+
+    /**
+     * Map pins, lines & polygons of each Project - Pilot 2 synchronises the elements
+     * drawn on a Remote Controller into the App Shared group of the Project
+     */
+    async pins(
+        env: Static<typeof InputSchema>,
+        projects: Static<typeof Project>[]
+    ): Promise<Static<typeof Feature.InputFeature>[]> {
+        const features: Static<typeof Feature.InputFeature>[] = [];
+
+        for (const project of projects) {
+            try {
+                const query = env.PINS_DISTRIBUTED_ONLY ? '?is_distributed=true' : '';
+                const data = await this.dji(
+                    env,
+                    `/map/api/v1/workspaces/${encodeURIComponent(project.uuid)}/element-groups${query}`,
+                    Type.Union([Type.Array(MapElementGroup), Type.Object({}, { additionalProperties: true })]),
+                    project.uuid
+                );
+
+                for (const group of Array.isArray(data) ? data : []) {
+                    for (const element of group.elements || []) {
+                        const feat = elementToFeature(element, group, project);
+
+                        if (feat) {
+                            features.push(feat);
+                        } else if (env.DEBUG) {
+                            console.log(`ok - element ${element.id} has no usable geometry`);
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error(`not ok - pins for project ${project.name || project.uuid}:`, err instanceof Error ? err.message : err);
+            }
+        }
+
+        return features;
     }
 
     async projects(env: Static<typeof InputSchema>): Promise<Static<typeof Project>[]> {
@@ -877,6 +1074,12 @@ export default class Task extends ETL {
         console.log(`ok - found ${devices.length} devices (${tracked.length} polled)`);
 
         const features = await this.features(env, tracked);
+
+        if (env.INCLUDE_PINS) {
+            const pins = await this.pins(env, projects);
+            console.log(`ok - found ${pins.length} map elements`);
+            features.push(...pins);
+        }
 
         if (features.length) {
             const fc: Static<typeof Feature.InputFeatureCollection> = {

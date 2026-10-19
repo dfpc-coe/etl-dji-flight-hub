@@ -181,6 +181,52 @@ async function mock(): Promise<Mock> {
             return json(200, { code: 200401, message: 'X-User-Token is invalid' });
         }
 
+        const groups = url.pathname.match(/^\/map\/api\/v1\/workspaces\/([^/]+)\/element-groups$/);
+        if (groups) {
+            if (groups[1] !== PROJECT_A) return json(200, { code: 0, message: 'success', data: null });
+
+            const distributed = url.searchParams.get('is_distributed') === 'true';
+
+            return json(200, {
+                code: 0,
+                message: 'success',
+                data: [
+                    { id: 'g-app', name: 'dji_app', type: 7, is_distributed: true, elements: [] },
+                    ...(distributed ? [] : [{
+                        id: 'g-default', name: 'default', type: 1, is_distributed: false,
+                        elements: [{
+                            id: 'el-line', name: 'Route A', desc: '', source: 0, status: 1, display: 1,
+                            resource: {
+                                type: 1, user_name: 'Nicholas Ingalls', user_id: '1', remark: '',
+                                content: { type: 'Feature', properties: { color: '#19BE6B', clampToGround: true }, geometry: { type: 'LineString', coordinates: [[-108.5376, 39.0784, 1393], [-108.5370, 39.0788, 1393]] } }
+                            },
+                            create_time: 1792442800000, update_time: 1792442900000
+                        }]
+                    }]),
+                    {
+                        id: 'g-share', name: 'share', type: 2, is_distributed: true,
+                        elements: [{
+                            id: '22cfe1ec-748c-4c6a-9ef1-58b263f53b9b', name: 'Nicholas Ingalls 4', desc: 'Staging area', source: 0, status: 1, display: 1,
+                            resource: {
+                                type: 0, user_name: 'Nicholas Ingalls', user_id: '1', remark: '',
+                                content: { type: 'Feature', properties: { IsTransparent: false, clampToGround: false, color: '#2D8CF0', icon: 0, is3d: false }, geometry: { type: 'Point', coordinates: [-108.53760088936559, 39.078463577137946, 1393.2000732421875], breadCrumbs: null } }
+                            },
+                            create_time: 1792442846530, update_time: 1792442846530, elevation_load_status: 0, notify: false
+                        }, {
+                            id: 'el-poly', name: 'Search Area', desc: '', source: 0, status: 1, display: 1,
+                            resource: {
+                                type: 2, user_name: 'Nicholas Ingalls', user_id: '1', remark: '',
+                                content: { type: 'Feature', properties: { color: '#E23C39' }, geometry: { type: 'Polygon', coordinates: [[-108.538, 39.078], [-108.537, 39.078], [-108.537, 39.079]] } }
+                            },
+                            create_time: 1792442850000, update_time: 1792442850000
+                        }, {
+                            id: 'el-bad', name: 'No fix', resource: { type: 0, content: { geometry: { type: 'Point', coordinates: [0, 0, 0] } } }
+                        }]
+                    }
+                ]
+            });
+        }
+
         const path = url.pathname.replace(/^\/openapi\/(v2\.0|v0\.1)/, '');
         if (path === url.pathname) return json(404, { code: 404, message: 'not found' });
 
@@ -323,6 +369,7 @@ async function run(api: Mock, environment: Record<string, unknown>) {
                 DJI_ORG_KEY: 'org-key',
                 DJI_API_URL: api.base,
                 DJI_WEBSOCKET: false,
+                INCLUDE_PINS: false,
                 ...environment
             },
             ephemeral: {}
@@ -603,6 +650,74 @@ test('control - streaming honours device class filters', async () => {
         const live = submitted.slice(1).flatMap((fc) => fc.features).map((f) => f.id);
         assert.ok(!live.includes(`dji-${RC_SN}`));
         assert.ok(live.includes('dji-1581F7FVC253H00D9BPW'));
+    } finally {
+        await api.close();
+    }
+});
+
+test('control - submits map pins, lines & polygons', async () => {
+    const api = await mock();
+
+    try {
+        const { submitted } = await run(api, { INCLUDE_PINS: true });
+
+        assert.deepEqual(api.requests.filter((r) => r.url.includes('/map/')).map((r) => `${r.url} ${r.project}`), [
+            `/map/api/v1/workspaces/${PROJECT_A}/element-groups ${PROJECT_A}`,
+            `/map/api/v1/workspaces/${PROJECT_B}/element-groups ${PROJECT_B}`
+        ]);
+
+        assert.equal(submitted.length, 1);
+        const ids = submitted[0].features.map((f) => f.id);
+        assert.ok(ids.includes('dji-pin-22cfe1ec-748c-4c6a-9ef1-58b263f53b9b'));
+        assert.ok(ids.includes('dji-pin-el-line'));
+        assert.ok(ids.includes('dji-pin-el-poly'));
+        assert.ok(!ids.includes('dji-pin-el-bad'));
+        assert.equal(submitted[0].features.length, 7);
+
+        const pin = submitted[0].features.find((f) => f.id === 'dji-pin-22cfe1ec-748c-4c6a-9ef1-58b263f53b9b')!;
+        assert.equal(pin.properties!.type, 'u-d-p');
+        assert.equal(pin.properties!.callsign, 'Nicholas Ingalls 4');
+        assert.equal(pin.properties!['marker-color'], '#2D8CF0');
+        assert.equal(pin.properties!.time, undefined);
+        assert.deepEqual(pin.geometry.coordinates, [-108.53760088936559, 39.078463577137946, 1393.2000732421875]);
+        assert.match(String(pin.properties!.remarks), /Staging area/);
+        assert.match(String(pin.properties!.remarks), /Created by: Nicholas Ingalls/);
+        assert.match(String(pin.properties!.remarks), /Layer: share/);
+        const meta = pin.properties!.metadata as Record<string, unknown>;
+        assert.equal(meta.device_class, 'pin');
+        assert.equal(meta.element_type, 'point');
+        assert.equal(meta.group_type, 'app_shared');
+        assert.equal(meta.author, 'Nicholas Ingalls');
+        assert.equal(meta.created, '2026-10-19T20:47:26.530Z');
+        assert.equal(meta.project_uuid, PROJECT_A);
+
+        const line = submitted[0].features.find((f) => f.id === 'dji-pin-el-line')!;
+        assert.equal(line.properties!.type, 'u-d-f');
+        assert.equal(line.properties!.stroke, '#19BE6B');
+        assert.equal(line.properties!.fill, undefined);
+        assert.equal(line.geometry.type, 'LineString');
+        assert.equal((line.properties!.metadata as Record<string, unknown>).group_type, 'default');
+
+        const poly = submitted[0].features.find((f) => f.id === 'dji-pin-el-poly')!;
+        assert.equal(poly.properties!.type, 'u-d-f');
+        assert.equal(poly.properties!.fill, '#E23C39');
+        assert.equal(poly.properties!['fill-opacity'], 0.2);
+        assert.deepEqual(poly.geometry.coordinates, [[[-108.538, 39.078], [-108.537, 39.078], [-108.537, 39.079], [-108.538, 39.078]]]);
+    } finally {
+        await api.close();
+    }
+});
+
+test('control - distributed pins only', async () => {
+    const api = await mock();
+
+    try {
+        const { submitted } = await run(api, { INCLUDE_PINS: true, PINS_DISTRIBUTED_ONLY: true });
+
+        assert.ok(api.requests.some((r) => r.url === `/map/api/v1/workspaces/${PROJECT_A}/element-groups?is_distributed=true`));
+        const ids = submitted[0].features.map((f) => f.id);
+        assert.ok(ids.includes('dji-pin-el-poly'));
+        assert.ok(!ids.includes('dji-pin-el-line'));
     } finally {
         await api.close();
     }

@@ -3,8 +3,9 @@
 <p align='center'>DJI FlightHub 2 UAS location tracking for CloudTAK</p>
 
 Polls the [DJI FlightHub 2](https://fh.dji.com) OpenAPI for the location of aircraft, docks and remote
-controllers, then streams their live telemetry (including the Laser Range Finder target) from the
-FlightHub 2 web socket, and submits them to TAK as Cursor-on-Target.
+controllers and the map pins, lines & polygons of each Project, then streams live telemetry (including
+the Laser Range Finder target) from the FlightHub 2 web socket, and submits them to TAK as
+Cursor-on-Target.
 
 ## Architecture
 
@@ -20,6 +21,7 @@ therefore makes the following requests:
 | 3 | `GET /openapi/{version}/device?device_model_class=drone` & `=airport` | List every aircraft & Dock in the Organization |
 | 4 | `GET /openapi/{version}/project/device/{device_sn}` | Find the Project of each device seen only in step 3 |
 | 5 | `GET /openapi/{version}/device/{device_sn}/state` | Thing Model of each online device, containing its location |
+| 6 | `GET /map/api/v1/workspaces/{project_uuid}/element-groups` | Map pins, lines & polygons of each Project. See [Map Pins](#map-pins) |
 
 Step 2 only lists Dock scene devices. Aircraft flown from a Remote Controller are omitted from it and are
 only returned by the Organization scope list in step 3, where they occupy the `gateway` slot of a pair
@@ -33,6 +35,36 @@ requests.
 
 A failure to list the Projects fails the invocation. A failure for a single Project or device is logged
 and the remaining devices are still submitted.
+
+### Map Pins
+
+Pins, lines and polygons drawn in DJI Pilot 2 on a Remote Controller are synchronised by Pilot 2 into the
+App Shared element group of the Project, and those drawn on the FlightHub 2 web map into its Default
+group. FlightHub 2 serves them on the DJI Cloud API map element route, `GET
+/map/api/v1/workspaces/{project_uuid}/element-groups`, on the same host as the OpenAPI and accepts the
+Organization Key for it. The route returns every element group with its elements inline and takes an
+optional `is_distributed=true` query, which limits it to the groups distributed to Remote Controllers
+(`PINS_DISTRIBUTED_ONLY`).
+
+| Group type | Name | Contents |
+| ---------- | ---- | -------- |
+| `1` | `default` | Elements drawn on the FlightHub 2 web map |
+| `2` | `share` (App Shared) | Elements drawn in Pilot 2 on a Remote Controller |
+| `7` | `dji_app` | Pilot 2 application layer |
+
+| Element | CoT Type | Styling |
+| ------- | -------- | ------- |
+| Point | `u-d-p` | `marker-color` from the element colour |
+| LineString | `u-d-f` | `stroke` from the element colour |
+| Polygon | `u-d-f` | `stroke` & `fill` (20% opacity) from the element colour. Rings are closed if Pilot 2 left them open |
+
+Elements are submitted as `dji-pin-<element id>` with the element name as callsign, the description,
+author, layer and Project in the remarks, and the element's creation and last update times in the
+metadata. An element that is deleted in FlightHub 2 is no longer submitted and ages out at the Layer's
+stale time. Elements without a usable geometry (ie a pin at `0,0`) are skipped.
+
+Writing TAK markers back to the pilot's map is possible through the documented OpenAPI
+`POST`/`PUT`/`DELETE /openapi/v2.0/map/element` routes but is not implemented.
 
 ### Live Telemetry Stream
 
@@ -96,6 +128,8 @@ and in the feature metadata.
 | `INCLUDE_DOCKS` | Submit Dock locations (default `true`) |
 | `INCLUDE_CONTROLLERS` | Submit Remote Controller locations, which is the location of the pilot (default `true`) |
 | `INCLUDE_OFFLINE` | Also request the state of devices reported as offline (default `false`) |
+| `INCLUDE_PINS` | Submit the map pins, lines & polygons of each Project (default `true`). See [Map Pins](#map-pins) |
+| `PINS_DISTRIBUTED_ONLY` | Only submit elements from groups distributed to Remote Controllers, skipping the Default group (default `false`) |
 | `DJI_WEBSOCKET` | Stream live telemetry from the FlightHub 2 web socket after the Thing Model snapshot (default `true`). See [Live Telemetry Stream](#live-telemetry-stream) |
 | `STREAM_DURATION` | Seconds to hold the stream open per invocation (default `50`) |
 | `STREAM_INTERVAL` | Seconds between live submissions (default `2`) |
