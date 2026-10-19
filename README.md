@@ -9,19 +9,26 @@ controllers and submits them to TAK as Cursor-on-Target.
 
 The FlightHub 2 OpenAPI is a polled REST API. Device lists describe which devices exist and whether they
 are online but do not contain coordinates - the location of a device is only published in its Thing Model
-(state), which has to be requested per device. Each scheduled invocation therefore makes three kinds of
-request:
+(state), which has to be requested per device under the Project that owns it. Each scheduled invocation
+therefore makes the following requests:
 
 | Step | Request | Purpose |
 | ---- | ------- | ------- |
 | 1 | `GET /openapi/{version}/project` | List the Projects in the Organization |
-| 2 | `GET /openapi/{version}/project/device` | List the gateway (Dock or Remote Controller) & aircraft pairs of each Project |
-| 3 | `GET /openapi/{version}/device/{device_sn}/state` | Thing Model of each online device, containing its location |
+| 2 | `GET /openapi/{version}/project/device` | List the Dock & aircraft pairs of each Project |
+| 3 | `GET /openapi/{version}/device?device_model_class=drone` & `=airport` | List every aircraft & Dock in the Organization |
+| 4 | `GET /openapi/{version}/project/device/{device_sn}` | Find the Project of each device seen only in step 3 |
+| 5 | `GET /openapi/{version}/device/{device_sn}/state` | Thing Model of each online device, containing its location |
+
+Step 2 only lists Dock scene devices. Aircraft flown from a Remote Controller are omitted from it and are
+only returned by the Organization scope list in step 3, where they occupy the `gateway` slot of a pair
+with no `drone`. The Organization list does not say which Project a device belongs to, so step 4 probes
+each Project in turn until one accepts the serial number.
 
 The default schedule is `rate(10 seconds)` so that a moving aircraft produces a usable track. Every
-invocation makes `1 + <projects> + <online devices>` requests, so an Organization with 3 Projects and
-5 online devices makes 9 requests every 10 seconds. Setting `DJI_PROJECTS` does not remove the Project
-list request, as it is the source of the Project names, but does limit the device list requests.
+invocation makes `3 + <projects> + <online devices>` requests plus up to `<projects>` requests for each
+device that is not paired with a Dock. Setting `DJI_PROJECTS` does not remove the Project list request,
+as it is the source of the Project names, but does limit the device list & Project lookup requests.
 
 Sub-minute schedules are run by the CloudTAK events pool rather than AWS EventBridge. Invocations are
 not queued behind one another, so the schedule should be lengthened if an invocation regularly takes
@@ -63,7 +70,9 @@ and in the feature metadata.
 | `DEBUG` | Print submitted features in the logs |
 
 The Organization Key is a JWT tied to the user that generated it. That user must be a member of each
-Project that is to be tracked, otherwise the Project's devices cannot be listed.
+Project that is to be tracked - an Organization administrator who is not a Project member can list the
+Project's devices but is refused their Thing Model with `200403 Forbidden` and a `path` of
+`device-management/team-view-device`.
 
 ### Regions
 

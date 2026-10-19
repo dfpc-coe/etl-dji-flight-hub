@@ -12,6 +12,13 @@
 
 ### Pending Release
 
+### v1.3.0
+
+- :bug: Consult the Organization device list, as aircraft flown from a Remote Controller are omitted from the Project device list
+- :bug: Treat aircraft returned in the gateway slot of a device pair as aircraft
+- :rocket: Resolve the Project of Organization devices before requesting their Thing Model
+- :pencil2: Document the Project membership required of the Organization Key user
+
 ### v1.2.0
 
 - :arrow_up: Update Core Dependencies

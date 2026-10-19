@@ -416,42 +416,106 @@ export default class Task extends ETL {
         });
     }
 
-    async devices(env: Static<typeof InputSchema>, projects: Static<typeof Project>[]): Promise<Tracked[]> {
-        const tracked: Map<string, Tracked> = new Map();
-
+    /**
+     * Resolve the Project a device belongs to - the Organization scope device
+     * list does not include it and the Thing Model is only served under that Project
+     */
+    async project(
+        env: Static<typeof InputSchema>,
+        sn: string,
+        projects: Static<typeof Project>[]
+    ): Promise<Static<typeof Project> | undefined> {
         for (const project of projects) {
-            let pairs: Static<typeof DevicePair>[];
             try {
-                const data = await this.dji(env, '/project/device', Type.Object({
-                    list: Type.Optional(Type.Array(DevicePair))
-                }, { additionalProperties: true }), project.uuid);
-
-                pairs = data.list || [];
-            } catch (err) {
-                console.error(`not ok - project ${project.name || project.uuid}:`, err instanceof Error ? err.message : err);
+                await this.dji(env, `/project/device/${encodeURIComponent(sn)}`, Type.Object({}, { additionalProperties: true }), project.uuid);
+                return project;
+            } catch {
                 continue;
             }
+        }
 
-            for (const pair of pairs) {
-                if (pair.gateway) {
-                    const device_class = deviceClass(pair.gateway, 'dock');
+        return undefined;
+    }
 
-                    if (
-                        (device_class === 'dock' && env.INCLUDE_DOCKS)
-                        || (device_class === 'controller' && env.INCLUDE_CONTROLLERS)
-                    ) {
-                        tracked.set(pair.gateway.sn, { device_class, device: pair.gateway, project });
-                    }
+    async devices(env: Static<typeof InputSchema>, projects: Static<typeof Project>[]): Promise<Tracked[]> {
+        const tracked: Map<string, Tracked> = new Map();
+        const seen: Set<string> = new Set();
+
+        const DeviceList = Type.Object({
+            list: Type.Optional(Type.Array(DevicePair))
+        }, { additionalProperties: true });
+
+        const track = (pair: Static<typeof DevicePair>, project: Static<typeof Project>) => {
+            let gateway = pair.gateway;
+
+            // Aircraft flown from a Remote Controller are listed in the gateway slot
+            if (gateway && deviceClass(gateway, 'dock') === 'drone') {
+                if (!seen.has(gateway.sn)) {
+                    seen.add(gateway.sn);
+                    tracked.set(gateway.sn, { device_class: 'drone', device: gateway, project });
                 }
+                gateway = undefined;
+            } else if (gateway && !seen.has(gateway.sn)) {
+                seen.add(gateway.sn);
+                const device_class = deviceClass(gateway, 'dock');
 
-                if (pair.drone) {
-                    tracked.set(pair.drone.sn, {
-                        device_class: 'drone',
-                        device: pair.drone,
-                        gateway: pair.gateway,
-                        project
-                    });
+                if (
+                    (device_class === 'dock' && env.INCLUDE_DOCKS)
+                    || (device_class === 'controller' && env.INCLUDE_CONTROLLERS)
+                ) {
+                    tracked.set(gateway.sn, { device_class, device: gateway, project });
                 }
+            }
+
+            if (pair.drone && !seen.has(pair.drone.sn)) {
+                seen.add(pair.drone.sn);
+                tracked.set(pair.drone.sn, {
+                    device_class: 'drone',
+                    device: pair.drone,
+                    gateway,
+                    project
+                });
+            }
+        };
+
+        for (const project of projects) {
+            try {
+                const data = await this.dji(env, '/project/device', DeviceList, project.uuid);
+                for (const pair of data.list || []) track(pair, project);
+            } catch (err) {
+                console.error(`not ok - project ${project.name || project.uuid}:`, err instanceof Error ? err.message : err);
+            }
+        }
+
+        // The Project device list omits aircraft that are not paired with a Dock
+        // so the Organization device list is also consulted
+        const pending: Static<typeof DevicePair>[] = [];
+        for (const device_model_class of ['drone', 'airport']) {
+            try {
+                const data = await this.dji(env, `/device?device_model_class=${device_model_class}`, DeviceList);
+
+                for (const pair of data.list || []) {
+                    const sn = pair.gateway?.sn || pair.drone?.sn;
+                    if (!sn || seen.has(sn)) continue;
+
+                    seen.add(sn);
+                    pending.push(pair);
+                }
+            } catch (err) {
+                console.error(`not ok - organization ${device_model_class} devices:`, err instanceof Error ? err.message : err);
+            }
+        }
+
+        for (const pair of pending) {
+            const sn = String(pair.gateway?.sn || pair.drone?.sn);
+            const project = await this.project(env, sn, projects);
+
+            if (project) {
+                if (pair.gateway) seen.delete(pair.gateway.sn);
+                if (pair.drone) seen.delete(pair.drone.sn);
+                track(pair, project);
+            } else if (env.DEBUG) {
+                console.log(`ok - ${sn} is not in a tracked project`);
             }
         }
 

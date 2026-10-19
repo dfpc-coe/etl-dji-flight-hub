@@ -57,6 +57,15 @@ const OFFLINE_DRONE = {
     mode_code: 14
 };
 
+const RC_DRONE = {
+    sn: '1581F7FVC253H00D9BPW',
+    callsign: 'Matrice 4E',
+    device_model: { key: '0-99-0', domain: '0', type: '99', sub_type: '0', name: 'Matrice 4E', class: 'drone' },
+    device_online_status: true,
+    mode_code: 0,
+    camera_list: null
+};
+
 const STATES: Record<string, unknown> = {
     [DOCK.sn]: {
         latitude: 22.793216926533837,
@@ -94,6 +103,20 @@ const STATES: Record<string, unknown> = {
         longitude: 0,
         height: 0,
         mode_code: 'not_connected'
+    },
+    [RC_DRONE.sn]: {
+        latitude: 39.07856625186832,
+        longitude: -108.53742546323147,
+        height: 1402.2998046875,
+        elevation: 0,
+        attitude_head: 50,
+        horizontal_speed: 0,
+        vertical_speed: 0,
+        home_distance: 1.9255199432373047,
+        mode_code: 'standby',
+        battery: { capacity_percent: 46, remain_flight_time: 0, batteries: null },
+        position_state: { gps_number: 13, rtk_number: 9, is_fixed: 'not_started', quality: '0' },
+        drone_in_dock: null
     }
 };
 
@@ -163,10 +186,42 @@ async function mock(): Promise<Mock> {
             return json(200, { code: 200403, message: 'No permission for the project' });
         }
 
+        if (path === '/device') {
+            const device_model_class = url.searchParams.get('device_model_class');
+
+            if (device_model_class === 'drone') {
+                return json(200, {
+                    code: 0,
+                    message: '',
+                    data: { list: [{ gateway: RC_DRONE, drone: null }, { gateway: DOCK, drone: DOCK_DRONE }] }
+                });
+            } else if (device_model_class === 'airport') {
+                return json(200, { code: 0, message: '', data: { list: [{ gateway: DOCK, drone: DOCK_DRONE }] } });
+            }
+
+            return json(200, { code: 210070, message: 'Bad Request' });
+        }
+
+        const details = path.match(/^\/project\/device\/([^/]+)$/);
+        if (details) {
+            if (project !== PROJECT_B || decodeURIComponent(details[1]) !== RC_DRONE.sn) {
+                return json(200, { code: 200400, message: 'Bad Request' });
+            }
+
+            return json(200, {
+                code: 0,
+                message: 'OK',
+                data: { device_sn: RC_DRONE.sn, device_model: RC_DRONE.device_model, is_org_device: true }
+            });
+        }
+
         const device = path.match(/^\/device\/([^/]+)\/state$/);
         if (device) {
             const device_state = state.states[decodeURIComponent(device[1])];
             if (!device_state) return json(200, { code: 212015, message: 'Device is offline.' });
+            if (device[1] === RC_DRONE.sn && project !== PROJECT_B) {
+                return json(200, { code: 200403, message: 'Forbidden', data: { path: 'device-management/team-view-device' } });
+            }
 
             return json(200, {
                 code: 0,
@@ -235,8 +290,13 @@ test('control - submits aircraft, docks & controllers', async () => {
             `/openapi/v2.0/device/${DOCK_DRONE.sn}/state ${PROJECT_A}`,
             `/openapi/v2.0/device/${CONTROLLER.sn}/state ${PROJECT_A}`,
             `/openapi/v2.0/device/${DOCK.sn}/state ${PROJECT_A}`,
+            `/openapi/v2.0/device/${RC_DRONE.sn}/state ${PROJECT_B}`,
             `/openapi/v2.0/project/device ${PROJECT_A}`,
             `/openapi/v2.0/project/device ${PROJECT_B}`,
+            `/openapi/v2.0/project/device/${RC_DRONE.sn} ${PROJECT_A}`,
+            `/openapi/v2.0/project/device/${RC_DRONE.sn} ${PROJECT_B}`,
+            '/openapi/v2.0/device?device_model_class=drone undefined',
+            '/openapi/v2.0/device?device_model_class=airport undefined',
             '/openapi/v2.0/project?page=1&page_size=100 undefined'
         ].sort());
 
@@ -245,7 +305,21 @@ test('control - submits aircraft, docks & controllers', async () => {
         }
 
         assert.equal(submitted.length, 1);
-        assert.equal(submitted[0].features.length, 3);
+        assert.equal(submitted[0].features.length, 4);
+
+        const rc = find(submitted[0], RC_DRONE.sn);
+        assert.equal(rc.properties.type, 'a-f-A-M-H-Q');
+        assert.equal(rc.properties.callsign, 'Matrice 4E');
+        assert.equal(rc.properties.course, 50);
+        assert.equal(rc.properties.sensor, undefined);
+        assert.deepEqual(rc.geometry.coordinates, [-108.53742546323147, 39.07856625186832, 1402.2998046875]);
+        assert.equal(rc.properties.metadata.airborne, false);
+        assert.equal(rc.properties.metadata.gateway_serial, undefined);
+        assert.equal(rc.properties.metadata.project, 'Project B');
+        assert.equal(rc.properties.metadata.project_uuid, PROJECT_B);
+        assert.equal(rc.properties.metadata.gps_satellites, 13);
+        assert.match(String(rc.properties.remarks), /Battery: 46%/);
+        assert.doesNotMatch(String(rc.properties.remarks), /Controller:|Dock:/);
 
         const drone = find(submitted[0], DOCK_DRONE.sn);
         assert.equal(drone.properties.type, 'a-f-A-M-H-Q');
@@ -295,6 +369,9 @@ test('control - honours device class & project filters on the v0.1 prefix', asyn
         assert.deepEqual(api.requests.map((r) => r.url), [
             '/openapi/v0.1/project?page=1&page_size=100',
             '/openapi/v0.1/project/device',
+            '/openapi/v0.1/device?device_model_class=drone',
+            '/openapi/v0.1/device?device_model_class=airport',
+            `/openapi/v0.1/project/device/${RC_DRONE.sn}`,
             `/openapi/v0.1/device/${DOCK_DRONE.sn}/state`
         ]);
 
@@ -322,12 +399,13 @@ test('control - integer mode codes, missing fixes & device failures', async () =
         const { submitted } = await run(api, { INCLUDE_OFFLINE: true });
 
         // The offline aircraft is requested but reports 0,0 & the controller request fails
-        assert.equal(api.requests.filter((r) => r.url.endsWith('/state')).length, 4);
+        assert.equal(api.requests.filter((r) => r.url.endsWith('/state')).length, 5);
 
         assert.equal(submitted.length, 1);
         assert.deepEqual(submitted[0].features.map((f) => f.id).sort(), [
             `dji-${DOCK_DRONE.sn}`,
-            `dji-${DOCK.sn}`
+            `dji-${DOCK.sn}`,
+            `dji-${RC_DRONE.sn}`
         ].sort());
 
         const drone = find(submitted[0], DOCK_DRONE.sn);
@@ -343,7 +421,7 @@ test('control - integer mode codes, missing fixes & device failures', async () =
 test('control - does not submit when no device reports a location', async () => {
     const api = await mock();
 
-    api.states = { [OFFLINE_DRONE.sn]: STATES[OFFLINE_DRONE.sn] };
+    api.states = { [OFFLINE_DRONE.sn]: STATES[OFFLINE_DRONE.sn], [RC_DRONE.sn]: STATES[OFFLINE_DRONE.sn] };
 
     try {
         const { submitted } = await run(api, { INCLUDE_OFFLINE: true });
