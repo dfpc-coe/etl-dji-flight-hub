@@ -6,7 +6,10 @@
         "module": "es2022",
         "esModuleInterop": true,
         "target": "es2022",
-        "lib": ["es2022", "dom"],
+        "lib": [
+            "es2022",
+            "dom"
+        ],
         "skipLibCheck": true,
         "noImplicitAny": true,
         "moduleResolution": "bundler",
@@ -16,6 +19,7 @@
         "outDir": "dist"
     },
     "include": [
-        "task.ts"
+        "task.ts",
+        "lib/**/*.ts"
     ]
 }

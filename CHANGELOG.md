@@ -12,6 +12,10 @@
 
 ### Pending Release
 
+### v1.8.0
+
+- :rocket: Split the task into `lib/dji-api.ts` (OpenAPI client & data model), `lib/dji-api-markers.ts` (map elements), `lib/dji-socket.ts` (web socket client) and `lib/features.ts` (CoT mapping), leaving `task.ts` as the control flow
+
 ### v1.7.0
 
 - :tada: Submit the map pins, lines & polygons of each Project - including those dropped in Pilot 2 on a Remote Controller - from the Cloud API `GET /map/api/v1/workspaces/{project_uuid}/element-groups` route, which accepts the Organization Key

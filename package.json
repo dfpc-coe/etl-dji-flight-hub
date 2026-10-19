@@ -6,7 +6,7 @@
     "description": "DJI FlightHub 2 UAS location tracking for CloudTAK",
     "main": "task.ts",
     "scripts": {
-        "lint": "eslint *.ts test/*.ts",
+        "lint": "eslint *.ts lib test",
         "build": "tsc --build",
         "test": "tsx --test test/*.test.ts"
     },

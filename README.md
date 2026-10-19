@@ -117,6 +117,16 @@ invocation produces nothing from it. The Thing Model snapshot still covers those
 Status, battery, height above takeoff, satellite counts and the owning Project are included in the remarks
 and in the feature metadata.
 
+## Code Layout
+
+| File | Contents |
+| ---- | -------- |
+| `task.ts` | ETL contract (input schema, invocation defaults) and the `control()` flow: discover Projects & devices, snapshot, pins, stream |
+| `lib/dji-api.ts` | `DJIApi` OpenAPI client (request envelope, Projects, device lists, Thing Model, Organization UUID), the DJI data model and telemetry utilities (mode names, payload & Laser Range Finder lookup) |
+| `lib/dji-api-markers.ts` | Map element groups: `markers()` fetch and `markerToFeature()` CoT mapping |
+| `lib/dji-socket.ts` | `DJISocket` client for the FlightHub 2 web socket - authentication, subscription, keepalive, acknowledgements, telemetry delivery |
+| `lib/features.ts` | Device state to CoT Features (`stateToFeatures()`), the output metadata schema and stream-only device classification |
+
 ## Configuration
 
 | Field | Description |
