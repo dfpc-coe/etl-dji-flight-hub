@@ -12,6 +12,10 @@
 
 ### Pending Release
 
+### v1.6.0
+
+- :rocket: Version Sync
+
 ### v1.5.0
 
 - :tada: Stream live telemetry from the FlightHub 2 web socket for the remainder of each invocation
