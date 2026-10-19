@@ -12,6 +12,10 @@
 
 ### Pending Release
 
+### v1.4.0
+
+- :rocket: Version Sync
+
 ### v1.3.0
 
 - :bug: Consult the Organization device list, as aircraft flown from a Remote Controller are omitted from the Project device list
