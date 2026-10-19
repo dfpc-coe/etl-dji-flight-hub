@@ -255,6 +255,21 @@ function validPosition(latitude?: number, longitude?: number): boolean {
     return Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180;
 }
 
+/**
+ * Payload telemetry is published both as a `cameras` array and as objects keyed by
+ * payload index (`88-0-0`) - the gimbal & Laser Range Finder are only in the latter
+ */
+function payloads(state: Static<typeof DeviceState>): Static<typeof Camera>[] {
+    const found: Static<typeof Camera>[] = [];
+
+    for (const [key, value] of Object.entries(state)) {
+        if (!/^\d+-\d+-\d+$/.test(key) || !value || typeof value !== 'object' || Array.isArray(value)) continue;
+        found.push(value as Static<typeof Camera>);
+    }
+
+    return found.concat(state.cameras || []);
+}
+
 function laser(state: Static<typeof DeviceState>): {
     latitude: number,
     longitude: number,
@@ -262,7 +277,7 @@ function laser(state: Static<typeof DeviceState>): {
     distance?: number,
     state: string
 } | undefined {
-    for (const camera of state.cameras || []) {
+    for (const camera of payloads(state)) {
         if (!validPosition(camera.measure_target_latitude, camera.measure_target_longitude)) continue;
 
         const code = camera.measure_target_error_state;
@@ -286,24 +301,12 @@ function laser(state: Static<typeof DeviceState>): {
 }
 
 function gimbal(state: Static<typeof DeviceState>): { yaw: number, pitch: number } | undefined {
-    for (const camera of state.cameras || []) {
+    for (const camera of payloads(state)) {
         if (typeof camera.gimbal_yaw !== 'number') continue;
 
         return {
             yaw: camera.gimbal_yaw,
             pitch: typeof camera.gimbal_pitch === 'number' ? camera.gimbal_pitch : 0
-        };
-    }
-
-    for (const [key, value] of Object.entries(state)) {
-        if (!/^\d+-\d+-\d+$/.test(key) || !value || typeof value !== 'object') continue;
-
-        const payload = value as Record<string, unknown>;
-        if (typeof payload.gimbal_yaw !== 'number') continue;
-
-        return {
-            yaw: payload.gimbal_yaw,
-            pitch: typeof payload.gimbal_pitch === 'number' ? payload.gimbal_pitch : 0
         };
     }
 

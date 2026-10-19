@@ -38,12 +38,13 @@ const DRONE_OSD = {
     mode_code: 3,
     battery: { capacity_percent: 61, remain_flight_time: 900, batteries: null },
     position_state: { gps_number: 14, rtk_number: 0, is_fixed: 0, quality: 5 },
-    cameras: [{
-        payload_index: '88-0-0', camera_mode: 0, zoom_factor: 7,
+    cameras: [{ payload_index: '88-0-0', camera_mode: 0, zoom_factor: 7, photo_state: 0 }],
+    '88-0-0': {
+        payload_index: '88-0-0', zoom_factor: 0.57,
         gimbal_yaw: 95, gimbal_pitch: -30, gimbal_roll: 0,
         measure_target_latitude: 39.0802, measure_target_longitude: -108.5363,
         measure_target_altitude: 1398.2, measure_target_distance: 213.7, measure_target_error_state: 0
-    }]
+    }
 };
 
 const PROJECT_A = '93df839d-ae74-4f04-842e-2f1f81c89a66';
@@ -153,7 +154,7 @@ async function mock(): Promise<Mock> {
         osd: [
             { sn: RC_SN, host: RC_OSD, to: ['org', PROJECT_B] },
             { sn: '1581F7FVC253H00D9BPW', host: DRONE_OSD, to: ['org', PROJECT_B] },
-            { sn: '1581F7FVC253H00D9BPW', host: { latitude: 39.0792, longitude: -108.5382, cameras: [{ payload_index: '88-0-0', gimbal_yaw: 100, measure_target_error_state: 3 }] }, to: ['org', PROJECT_B], delay: 1300 }
+            { sn: '1581F7FVC253H00D9BPW', host: { latitude: 39.0792, longitude: -108.5382, '88-0-0': { payload_index: '88-0-0', gimbal_yaw: 100, measure_target_error_state: 3, measure_target_latitude: 39.0802, measure_target_longitude: -108.5363 } }, to: ['org', PROJECT_B], delay: 1300 }
         ],
         sockets: [],
         close: async () => {}

@@ -12,6 +12,10 @@
 
 ### Pending Release
 
+### v1.6.1
+
+- :bug: Read the gimbal & Laser Range Finder from the payload index keyed OSD object (`88-0-0`), the `cameras` array only carries camera settings
+
 ### v1.6.0
 
 - :rocket: Version Sync

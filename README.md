@@ -37,7 +37,8 @@ and the remaining devices are still submitted.
 ### Live Telemetry Stream
 
 The Thing Model is a snapshot and omits the payload telemetry (gimbal angles, Laser Range Finder) that
-only exists in the DJI Cloud API OSD stream. The FlightHub 2 web UI receives that stream over a web
+only exists in the DJI Cloud API OSD stream, where it is published as an object keyed by payload index
+(ie `88-0-0`) alongside the `cameras` array. The FlightHub 2 web UI receives that stream over a web
 socket at `/duplex/web` on the same host as the OpenAPI, and the socket accepts the Organization Key.
 This channel is not documented by DJI - it was derived from the FlightHub 2 web application and may
 change without notice.
@@ -78,8 +79,8 @@ invocation produces nothing from it. The Thing Model snapshot still covers those
 | Point | `longitude`, `latitude`, `height` | `height` is relative to the ellipsoid, matching CoT HAE. Devices reporting `0,0` have no position fix and are skipped |
 | `course` | `attitude_head` | Aircraft only. Published as -180 to 180 from true north, normalized to 0 to 360 |
 | `speed` | `horizontal_speed` | Aircraft only. m/s |
-| `sensor` | `cameras[].gimbal_yaw`, `gimbal_pitch` (stream) or `<payload index>.gimbal_yaw` (Thing Model) | Airborne aircraft only. FoV is a constant (45). Range is the Laser Range Finder distance when it is measuring, otherwise 100m |
-| Laser target Point | `cameras[].measure_target_longitude`, `measure_target_latitude`, `measure_target_altitude` | Stream only. Emitted while `measure_target_error_state` is normal and the target has a position. The distance is also added to the aircraft remarks & metadata |
+| `sensor` | `<payload index>.gimbal_yaw`, `gimbal_pitch` | Airborne aircraft only. The payload object (ie `88-0-0`) is only present on the stream. FoV is a constant (45). Range is the Laser Range Finder distance when it is measuring, otherwise 100m |
+| Laser target Point | `<payload index>.measure_target_longitude`, `measure_target_latitude`, `measure_target_altitude` | Stream only. Emitted while `measure_target_error_state` is normal and the target has a position. The distance is also added to the aircraft remarks & metadata. The `cameras` array is also checked for the same fields |
 
 Status, battery, height above takeoff, satellite counts and the owning Project are included in the remarks
 and in the feature metadata.
