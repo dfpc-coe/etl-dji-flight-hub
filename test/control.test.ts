@@ -445,7 +445,7 @@ test('control - submits aircraft, docks & controllers', async () => {
         assert.equal(drone.properties.callsign, 'Test Dock M3TD');
         assert.equal(drone.properties.course, 270);
         assert.equal(drone.properties.speed, 12.5);
-        assert.deepEqual(drone.properties.sensor, { azimuth: 190, elevation: -45, fov: 45, range: 100 });
+        assert.deepEqual(drone.properties.sensor, { azimuth: 190, elevation: -45, fov: 39.6, vfov: 30.3, range: 100 });
         assert.deepEqual(drone.geometry.coordinates, [114.3601, 22.7951, 169.5]);
         assert.match(String(drone.properties.remarks), /Status: Wayline Flight/);
         assert.match(String(drone.properties.remarks), /Battery: 76%/);
@@ -611,7 +611,7 @@ test('control - streams live telemetry over the web socket', async () => {
         assert.equal(drone.properties!.callsign, 'Matrice 4E');
         assert.equal(drone.properties!.course, 120);
         assert.equal(drone.properties!.speed, 4.2);
-        assert.deepEqual(drone.properties!.sensor, { azimuth: 95, elevation: -30, fov: 45, range: 213.7 });
+        assert.deepEqual(drone.properties!.sensor, { azimuth: 95, elevation: -30, fov: 11.7, vfov: 8.8, range: 213.7 });
         assert.equal(meta.status, 'manual_flight');
         assert.equal(meta.airborne, true);
         assert.equal(meta.battery, 61);
@@ -620,7 +620,7 @@ test('control - streams live telemetry over the web socket', async () => {
         assert.match(String(drone.properties!.remarks), /Laser Range: 214m/);
 
         assert.deepEqual(after.geometry.coordinates, [-108.5382, 39.0792, 1450.5]);
-        assert.deepEqual(after.properties!.sensor, { azimuth: 100, elevation: 0, fov: 45, range: 100 });
+        assert.deepEqual(after.properties!.sensor, { azimuth: 100, elevation: 0, fov: 11.7, vfov: 8.8, range: 100 });
         assert.equal((after.properties!.metadata as Record<string, unknown>).laser_state, undefined);
         assert.equal(ids.filter((id) => id === 'dji-1581F7FVC253H00D9BPW-rng').length, 1);
 

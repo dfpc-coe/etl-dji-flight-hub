@@ -43,6 +43,7 @@ export const Camera = Type.Object({
     payload_index: Type.Optional(Type.String()),
     gimbal_yaw: Type.Optional(Type.Number()),
     gimbal_pitch: Type.Optional(Type.Number()),
+    zoom_factor: Type.Optional(Type.Number()),
     measure_target_latitude: Type.Optional(Type.Number()),
     measure_target_longitude: Type.Optional(Type.Number()),
     measure_target_altitude: Type.Optional(Type.Number()),
@@ -230,6 +231,17 @@ export function gimbal(state: Static<typeof DeviceState>): { yaw: number, pitch:
     }
 
     return undefined;
+}
+
+/**
+ * Hybrid zoom relative to the wide camera (1 = 24mm equivalent)
+ */
+export function zoom(state: Static<typeof DeviceState>): number {
+    for (const camera of payloads(state)) {
+        if (typeof camera.zoom_factor === 'number' && camera.zoom_factor >= 1) return camera.zoom_factor;
+    }
+
+    return 1;
 }
 
 export type DJIApiOptions = {

@@ -2,7 +2,7 @@ import { Type } from '@sinclair/typebox';
 import type { Static } from '@sinclair/typebox';
 import type { Feature } from '@tak-ps/etl';
 import type { Device, DeviceClass, DeviceState, Project } from './dji-api.js';
-import { GroundedModes, deviceClass, gimbal, laser, modeName, validPosition } from './dji-api.js';
+import { GroundedModes, deviceClass, gimbal, laser, modeName, validPosition, zoom } from './dji-api.js';
 
 /**
  * Device state => CoT Features
@@ -65,9 +65,16 @@ export const CoTType: Record<DeviceClass, string> = {
 // Sensor Point of Interest
 export const LaserCoTType = 'b-m-p-s-p-i';
 
-// Range/FoV are not published so a representative FoV is used
-export const SensorFoV = 45;
+// Wide camera (24mm equivalent, 84° diagonal on a 4:3 sensor) at 1x zoom
+export const SensorFoV = 71.5;
+export const SensorVFoV = 56.8;
 export const SensorRange = 100;
+
+const DEG = Math.PI / 180;
+
+export function sensorFov(wide: number, zoomFactor: number): number {
+    return Math.round(2 * Math.atan(Math.tan(wide / 2 * DEG) / zoomFactor) / DEG * 10) / 10;
+}
 
 export function humanize(value: string): string {
     return value.split('_').map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
@@ -175,10 +182,13 @@ export function stateToFeatures(
 
         const payload = gimbal(state);
         if (airborne && payload) {
+            const zoomFactor = zoom(state);
+
             feat.properties.sensor = {
                 azimuth: compass(payload.yaw),
                 elevation: payload.pitch,
-                fov: SensorFoV,
+                fov: sensorFov(SensorFoV, zoomFactor),
+                vfov: sensorFov(SensorVFoV, zoomFactor),
                 range: target?.distance ?? SensorRange
             };
         }

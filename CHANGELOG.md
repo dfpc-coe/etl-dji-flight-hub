@@ -12,6 +12,10 @@
 
 ### Pending Release
 
+### v1.8.1
+
+- :rocket: Improve FOV calculation
+
 ### v1.8.0
 
 - :rocket: Split the task into `lib/dji-api.ts` (OpenAPI client & data model), `lib/dji-api-markers.ts` (map elements), `lib/dji-socket.ts` (web socket client) and `lib/features.ts` (CoT mapping), leaving `task.ts` as the control flow
