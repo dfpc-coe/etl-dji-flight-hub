@@ -127,11 +127,22 @@ export function validate<T extends TSchema>(schema: T, body: unknown): Static<T>
     throw new Error(`Unexpected FlightHub response: ${error?.path} ${error?.message}`);
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null;
+}
+
+function display(value: unknown): string {
+    return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
 // FlightHub 2 returns null in place of empty collections & unset values
+export function stripNulls(value: Record<string, unknown>): Record<string, unknown>;
+export function stripNulls(value: unknown): unknown;
 export function stripNulls(value: unknown): unknown {
     if (Array.isArray(value)) {
-        return value.filter((entry) => entry !== null).map(stripNulls);
-    } else if (value && typeof value === 'object') {
+        const entries: unknown[] = value;
+        return entries.filter((entry) => entry !== null).map((entry) => stripNulls(entry));
+    } else if (isObject(value)) {
         const out: Record<string, unknown> = {};
         for (const [key, entry] of Object.entries(value)) {
             if (entry !== null) out[key] = stripNulls(entry);
@@ -181,11 +192,11 @@ export function payloads(state: Static<typeof DeviceState>): Static<typeof Camer
     const found: Static<typeof Camera>[] = [];
 
     for (const [key, value] of Object.entries(state)) {
-        if (!/^\d+-\d+-\d+$/.test(key) || !value || typeof value !== 'object' || Array.isArray(value)) continue;
-        found.push(value as Static<typeof Camera>);
+        if (!/^\d+-\d+-\d+$/.test(key) || Array.isArray(value) || !Value.Check(Camera, value)) continue;
+        found.push(value);
     }
 
-    return found.concat(state.cameras || []);
+    return found.concat(state.cameras ?? []);
 }
 
 export type LaserTarget = {
@@ -198,7 +209,9 @@ export type LaserTarget = {
 
 export function laser(state: Static<typeof DeviceState>): LaserTarget | undefined {
     for (const camera of payloads(state)) {
-        if (!validPosition(camera.measure_target_latitude, camera.measure_target_longitude)) continue;
+        const latitude = camera.measure_target_latitude;
+        const longitude = camera.measure_target_longitude;
+        if (latitude === undefined || longitude === undefined || !validPosition(latitude, longitude)) continue;
 
         const code = camera.measure_target_error_state;
         const index = Number(code ?? 0);
@@ -209,8 +222,8 @@ export function laser(state: Static<typeof DeviceState>): LaserTarget | undefine
         if (status !== 'normal') continue;
 
         return {
-            latitude: camera.measure_target_latitude as number,
-            longitude: camera.measure_target_longitude as number,
+            latitude,
+            longitude,
             altitude: camera.measure_target_altitude,
             distance: camera.measure_target_distance,
             state: status
@@ -261,7 +274,7 @@ export class DJIApi {
         this.url = opts.url.replace(/\/+$/, '');
         this.version = opts.version;
         this.key = opts.key;
-        this.unsafe = opts.unsafe || false;
+        this.unsafe = opts.unsafe ?? false;
     }
 
     /**
@@ -290,16 +303,20 @@ export class DJIApi {
 
         const text = await res.text();
 
-        let envelope: { code?: unknown, message?: unknown, data?: unknown };
+        let envelope: unknown;
         try {
             envelope = JSON.parse(text);
         } catch {
             throw new Error(`FlightHub GET ${path} failed (${res.status}): ${text.slice(0, 200)}`);
         }
 
+        if (!isObject(envelope)) {
+            throw new Error(`FlightHub GET ${path} failed (${res.status}): ${text.slice(0, 200)}`);
+        }
+
         // Business errors are most often returned as a 200 with a non-zero code
         if (!res.ok || envelope.code !== 0) {
-            throw new Error(`FlightHub GET ${path} failed (${res.status}): ${envelope.code} ${envelope.message}`);
+            throw new Error(`FlightHub GET ${path} failed (${res.status}): ${display(envelope.code)} ${display(envelope.message)}`);
         }
 
         return validate(schema, stripNulls(envelope.data ?? {}));
@@ -315,11 +332,11 @@ export class DJIApi {
         for (let page = 1; page <= 100; page++) {
             const data = await this.get(`/project?page=${page}&page_size=${page_size}`, ProjectList);
 
-            const list = (data.list || []).filter((project) => !projects.has(project.uuid));
+            const list = (data.list ?? []).filter((project) => !projects.has(project.uuid));
             for (const project of list) projects.set(project.uuid, project);
 
             // A page without unseen projects also guards against pagination being ignored
-            if (!list.length || (data.list || []).length < page_size) break;
+            if (list.length === 0 || (data.list ?? []).length < page_size) break;
         }
 
         return Array.from(projects.values());
@@ -331,7 +348,7 @@ export class DJIApi {
      */
     async projectDevices(project: string): Promise<Static<typeof DevicePair>[]> {
         const data = await this.get('/project/device', DeviceList, project);
-        return data.list || [];
+        return data.list ?? [];
     }
 
     /**
@@ -340,7 +357,7 @@ export class DJIApi {
      */
     async organizationDevices(device_model_class: 'drone' | 'airport'): Promise<Static<typeof DevicePair>[]> {
         const data = await this.get(`/device?device_model_class=${device_model_class}`, DeviceList);
-        return data.list || [];
+        return data.list ?? [];
     }
 
     /**
@@ -376,8 +393,8 @@ export class DJIApi {
      */
     organization(projects: Static<typeof Project>[]): string {
         try {
-            const claims = JSON.parse(Buffer.from(this.key.split('.')[1], 'base64url').toString());
-            if (typeof claims.organization_uuid === 'string' && claims.organization_uuid) return claims.organization_uuid;
+            const claims: unknown = JSON.parse(Buffer.from(this.key.split('.')[1], 'base64url').toString());
+            if (isObject(claims) && typeof claims.organization_uuid === 'string' && claims.organization_uuid) return claims.organization_uuid;
         } catch {
             // Not a JWT
         }

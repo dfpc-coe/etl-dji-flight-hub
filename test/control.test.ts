@@ -162,12 +162,17 @@ async function mock(): Promise<Mock> {
 
     const server = http.createServer((req, res) => {
         const url = new URL(req.url || '/', 'http://localhost');
-        const project = req.headers['x-project-uuid'] ? String(req.headers['x-project-uuid']) : undefined;
+        const header = (name: string): string | undefined => {
+            const value = req.headers[name];
+            return Array.isArray(value) ? value.join(',') : value || undefined;
+        };
+
+        const project = header('x-project-uuid');
 
         state.requests.push({
             url: req.url || '',
             project,
-            request_id: req.headers['x-request-id'] ? String(req.headers['x-request-id']) : undefined
+            request_id: header('x-request-id')
         });
 
         const json = (code: number, body: unknown) => {
@@ -175,19 +180,24 @@ async function mock(): Promise<Mock> {
             res.end(JSON.stringify(body));
         };
 
-        if (!req.headers['x-user-token']) {
-            return json(200, { code: 200401, message: 'X-User-Token not found or empty' });
-        } else if (req.headers['x-user-token'] !== 'org-key') {
-            return json(200, { code: 200401, message: 'X-User-Token is invalid' });
+        if (!header('x-user-token')) {
+            json(200, { code: 200401, message: 'X-User-Token not found or empty' });
+            return;
+        } else if (header('x-user-token') !== 'org-key') {
+            json(200, { code: 200401, message: 'X-User-Token is invalid' });
+            return;
         }
 
         const groups = url.pathname.match(/^\/map\/api\/v1\/workspaces\/([^/]+)\/element-groups$/);
         if (groups) {
-            if (groups[1] !== PROJECT_A) return json(200, { code: 0, message: 'success', data: null });
+            if (groups[1] !== PROJECT_A) {
+                json(200, { code: 0, message: 'success', data: null });
+                return;
+            }
 
             const distributed = url.searchParams.get('is_distributed') === 'true';
 
-            return json(200, {
+            json(200, {
                 code: 0,
                 message: 'success',
                 data: [
@@ -225,15 +235,22 @@ async function mock(): Promise<Mock> {
                     }
                 ]
             });
+            return;
         }
 
         const path = url.pathname.replace(/^\/openapi\/(v2\.0|v0\.1)/, '');
-        if (path === url.pathname) return json(404, { code: 404, message: 'not found' });
+        if (path === url.pathname) {
+            json(404, { code: 404, message: 'not found' });
+            return;
+        }
 
         if (path === '/project') {
-            if (url.searchParams.get('page') !== '1') return json(200, { code: 0, message: 'OK', data: { list: null } });
+            if (url.searchParams.get('page') !== '1') {
+                json(200, { code: 0, message: 'OK', data: { list: null } });
+                return;
+            }
 
-            return json(200, {
+            json(200, {
                 code: 0,
                 message: 'OK',
                 data: {
@@ -243,11 +260,12 @@ async function mock(): Promise<Mock> {
                     ]
                 }
             });
+            return;
         }
 
         if (path === '/project/device') {
             if (project === PROJECT_A) {
-                return json(200, {
+                json(200, {
                     code: 0,
                     message: 'OK',
                     data: {
@@ -257,55 +275,68 @@ async function mock(): Promise<Mock> {
                         ]
                     }
                 });
+                return;
             } else if (project === PROJECT_B) {
-                return json(200, { code: 0, message: 'OK', data: { list: null } });
+                json(200, { code: 0, message: 'OK', data: { list: null } });
+                return;
             }
 
-            return json(200, { code: 200403, message: 'No permission for the project' });
+            json(200, { code: 200403, message: 'No permission for the project' });
+            return;
         }
 
         if (path === '/device') {
             const device_model_class = url.searchParams.get('device_model_class');
 
             if (device_model_class === 'drone') {
-                return json(200, {
+                json(200, {
                     code: 0,
                     message: '',
                     data: { list: [{ gateway: RC_DRONE, drone: null }, { gateway: DOCK, drone: DOCK_DRONE }] }
                 });
+                return;
             } else if (device_model_class === 'airport') {
-                return json(200, { code: 0, message: '', data: { list: [{ gateway: DOCK, drone: DOCK_DRONE }] } });
+                json(200, { code: 0, message: '', data: { list: [{ gateway: DOCK, drone: DOCK_DRONE }] } });
+                return;
             }
 
-            return json(200, { code: 210070, message: 'Bad Request' });
+            json(200, { code: 210070, message: 'Bad Request' });
+            return;
         }
 
         const details = path.match(/^\/project\/device\/([^/]+)$/);
         if (details) {
             if (project !== PROJECT_B || decodeURIComponent(details[1]) !== RC_DRONE.sn) {
-                return json(200, { code: 200400, message: 'Bad Request' });
+                json(200, { code: 200400, message: 'Bad Request' });
+                return;
             }
 
-            return json(200, {
+            json(200, {
                 code: 0,
                 message: 'OK',
                 data: { device_sn: RC_DRONE.sn, device_model: RC_DRONE.device_model, is_org_device: true }
             });
+            return;
         }
 
         const device = path.match(/^\/device\/([^/]+)\/state$/);
         if (device) {
             const device_state = state.states[decodeURIComponent(device[1])];
-            if (!device_state) return json(200, { code: 212015, message: 'Device is offline.' });
+            if (device_state === undefined) {
+                json(200, { code: 212015, message: 'Device is offline.' });
+                return;
+            }
             if (device[1] === RC_DRONE.sn && project !== PROJECT_B) {
-                return json(200, { code: 200403, message: 'Forbidden', data: { path: 'device-management/team-view-device' } });
+                json(200, { code: 200403, message: 'Forbidden', data: { path: 'device-management/team-view-device' } });
+                return;
             }
 
-            return json(200, {
+            json(200, {
                 code: 0,
                 message: '',
                 data: { device_sn: device[1], device_state }
             });
+            return;
         }
 
         json(404, { code: 404, message: 'not found' });
@@ -318,18 +349,27 @@ async function mock(): Promise<Mock> {
         const record = { token, sent: [] as unknown[] };
         state.sockets.push(record);
 
-        if (token !== 'org-key') return socket.close(4001, 'unauthorized');
+        if (token !== 'org-key') {
+            socket.close(4001, 'unauthorized');
+            return;
+        }
 
         socket.on('message', (raw) => {
-            const text = String(raw);
-            if (text === 'ping') return socket.send('pong');
+            const text = Buffer.isBuffer(raw) ? raw.toString() : '';
+            if (text === 'ping') {
+                socket.send('pong');
+                return;
+            }
 
-            const msg = JSON.parse(text);
+            const msg = JSON.parse(text) as { biz_code?: string; msg_trace_id?: string; data?: { organization?: string } };
             record.sent.push(msg);
 
             if (msg.biz_code !== 'biz_scope') return;
 
-            if (!msg.data?.organization) return socket.close(4003);
+            if (!msg.data?.organization) {
+                socket.close(4003);
+                return;
+            }
 
             socket.send(JSON.stringify({ biz_code: 'biz_scope', conn_id: 'conn', conn_platform: 'web', msg_trace_id: msg.msg_trace_id }));
             socket.send(JSON.stringify({
@@ -350,9 +390,9 @@ async function mock(): Promise<Mock> {
         });
     });
 
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>((resolve) => { server.listen(0, '127.0.0.1', resolve); });
     state.base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    state.close = () => new Promise((resolve) => { wss.close(); server.close(() => resolve()); });
+    state.close = () => new Promise((resolve) => { wss.close(); server.close(() => { resolve(); }); });
 
     return state;
 }
@@ -395,7 +435,6 @@ async function run(api: Mock, environment: Record<string, unknown>) {
 function find(fc: FeatureCollection, sn: string) {
     const feat = fc.features.find((f) => f.id === `dji-${sn}`);
     assert.ok(feat, `expected a feature for ${sn}`);
-    assert.ok(feat.properties);
     return feat as typeof feat & { properties: NonNullable<typeof feat.properties> & { metadata: Record<string, unknown> } };
 }
 
@@ -572,7 +611,7 @@ test('control - streams live telemetry over the web socket', async () => {
         assert.equal(api.sockets.length, 1);
         assert.equal(api.sockets[0].token, 'org-key');
 
-        const subscribe = api.sockets[0].sent.find((m) => (m as { biz_code: string }).biz_code === 'biz_scope') as Record<string, unknown>;
+        const subscribe = api.sockets[0].sent.find((m) => (m as { biz_code: string }).biz_code === 'biz_scope') as Record<string, unknown> | undefined;
         assert.ok(subscribe);
         assert.equal(subscribe.version, '1.0');
         assert.match(String(subscribe.msg_trace_id), /^[0-9a-f-]{36}$/);
@@ -591,44 +630,44 @@ test('control - streams live telemetry over the web socket', async () => {
 
         const live = submitted.slice(1).flatMap((fc) => fc.features);
         const ids = live.map((f) => f.id);
-        assert.ok(ids.includes(`dji-${RC_SN}`), `controller missing from ${ids}`);
-        assert.ok(ids.includes('dji-1581F7FVC253H00D9BPW'), `aircraft missing from ${ids}`);
-        assert.ok(ids.includes('dji-1581F7FVC253H00D9BPW-rng'), `laser target missing from ${ids}`);
+        assert.ok(ids.includes(`dji-${RC_SN}`), `controller missing from ${ids.join(',')}`);
+        assert.ok(ids.includes('dji-1581F7FVC253H00D9BPW'), `aircraft missing from ${ids.join(',')}`);
+        assert.ok(ids.includes('dji-1581F7FVC253H00D9BPW-rng'), `laser target missing from ${ids.join(',')}`);
 
         const rc = live.find((f) => f.id === `dji-${RC_SN}`)!;
-        assert.equal(rc.properties!.type, 'a-f-G-U-C-V-U-R');
-        assert.equal(rc.properties!.callsign, `DJI ${RC_SN}`);
+        assert.equal(rc.properties.type, 'a-f-G-U-C-V-U-R');
+        assert.equal(rc.properties.callsign, `DJI ${RC_SN}`);
         assert.deepEqual(rc.geometry.coordinates, [-108.5374171, 39.078575, 0]);
-        assert.equal((rc.properties!.metadata as Record<string, unknown>).project_uuid, PROJECT_B);
-        assert.equal((rc.properties!.metadata as Record<string, unknown>).live, true);
+        assert.equal((rc.properties.metadata as Record<string, unknown>).project_uuid, PROJECT_B);
+        assert.equal((rc.properties.metadata as Record<string, unknown>).live, true);
 
         // The second OSD merges over the first, the laser then reports no signal
         const drones = live.filter((f) => f.id === 'dji-1581F7FVC253H00D9BPW');
         assert.equal(drones.length, 2);
         const [drone, after] = drones;
-        const meta = drone.properties!.metadata as Record<string, unknown>;
-        assert.equal(drone.properties!.type, 'a-f-A-M-H-Q');
-        assert.equal(drone.properties!.callsign, 'Matrice 4E');
-        assert.equal(drone.properties!.course, 120);
-        assert.equal(drone.properties!.speed, 4.2);
-        assert.deepEqual(drone.properties!.sensor, { azimuth: 95, elevation: -30, fov: 11.7, vfov: 8.8, range: 213.7 });
+        const meta = drone.properties.metadata as Record<string, unknown>;
+        assert.equal(drone.properties.type, 'a-f-A-M-H-Q');
+        assert.equal(drone.properties.callsign, 'Matrice 4E');
+        assert.equal(drone.properties.course, 120);
+        assert.equal(drone.properties.speed, 4.2);
+        assert.deepEqual(drone.properties.sensor, { azimuth: 95, elevation: -30, fov: 11.7, vfov: 8.8, range: 213.7 });
         assert.equal(meta.status, 'manual_flight');
         assert.equal(meta.airborne, true);
         assert.equal(meta.battery, 61);
         assert.equal(meta.project, 'Project B');
         assert.equal(meta.laser_distance, 213.7);
-        assert.match(String(drone.properties!.remarks), /Laser Range: 214m/);
+        assert.match(String(drone.properties.remarks), /Laser Range: 214m/);
 
         assert.deepEqual(after.geometry.coordinates, [-108.5382, 39.0792, 1450.5]);
-        assert.deepEqual(after.properties!.sensor, { azimuth: 100, elevation: 0, fov: 11.7, vfov: 8.8, range: 100 });
-        assert.equal((after.properties!.metadata as Record<string, unknown>).laser_state, undefined);
+        assert.deepEqual(after.properties.sensor, { azimuth: 100, elevation: 0, fov: 11.7, vfov: 8.8, range: 100 });
+        assert.equal((after.properties.metadata as Record<string, unknown>).laser_state, undefined);
         assert.equal(ids.filter((id) => id === 'dji-1581F7FVC253H00D9BPW-rng').length, 1);
 
         const first = live.find((f) => f.id === 'dji-1581F7FVC253H00D9BPW-rng')!;
-        assert.equal(first.properties!.type, 'b-m-p-s-p-i');
-        assert.equal(first.properties!.callsign, 'Matrice 4E RNG');
+        assert.equal(first.properties.type, 'b-m-p-s-p-i');
+        assert.equal(first.properties.callsign, 'Matrice 4E RNG');
         assert.deepEqual(first.geometry.coordinates, [-108.5363, 39.0802, 1398.2]);
-        const laser = first.properties!.metadata as Record<string, unknown>;
+        const laser = first.properties.metadata as Record<string, unknown>;
         assert.equal(laser.device_class, 'laser');
         assert.equal(laser.laser_distance, 213.7);
         assert.equal(laser.laser_state, 'normal');
@@ -647,9 +686,9 @@ test('control - streaming honours device class filters', async () => {
             INCLUDE_CONTROLLERS: false, INCLUDE_DOCKS: false
         });
 
-        const live = submitted.slice(1).flatMap((fc) => fc.features).map((f) => f.id);
-        assert.ok(!live.includes(`dji-${RC_SN}`));
-        assert.ok(live.includes('dji-1581F7FVC253H00D9BPW'));
+        const live = new Set(submitted.slice(1).flatMap((fc) => fc.features).map((f) => f.id));
+        assert.ok(!live.has(`dji-${RC_SN}`));
+        assert.ok(live.has('dji-1581F7FVC253H00D9BPW'));
     } finally {
         await api.close();
     }
@@ -667,23 +706,23 @@ test('control - submits map pins, lines & polygons', async () => {
         ]);
 
         assert.equal(submitted.length, 1);
-        const ids = submitted[0].features.map((f) => f.id);
-        assert.ok(ids.includes('dji-pin-22cfe1ec-748c-4c6a-9ef1-58b263f53b9b'));
-        assert.ok(ids.includes('dji-pin-el-line'));
-        assert.ok(ids.includes('dji-pin-el-poly'));
-        assert.ok(!ids.includes('dji-pin-el-bad'));
+        const ids = new Set(submitted[0].features.map((f) => f.id));
+        assert.ok(ids.has('dji-pin-22cfe1ec-748c-4c6a-9ef1-58b263f53b9b'));
+        assert.ok(ids.has('dji-pin-el-line'));
+        assert.ok(ids.has('dji-pin-el-poly'));
+        assert.ok(!ids.has('dji-pin-el-bad'));
         assert.equal(submitted[0].features.length, 7);
 
         const pin = submitted[0].features.find((f) => f.id === 'dji-pin-22cfe1ec-748c-4c6a-9ef1-58b263f53b9b')!;
-        assert.equal(pin.properties!.type, 'u-d-p');
-        assert.equal(pin.properties!.callsign, 'Nicholas Ingalls 4');
-        assert.equal(pin.properties!['marker-color'], '#2D8CF0');
-        assert.equal(pin.properties!.time, undefined);
+        assert.equal(pin.properties.type, 'u-d-p');
+        assert.equal(pin.properties.callsign, 'Nicholas Ingalls 4');
+        assert.equal(pin.properties['marker-color'], '#2D8CF0');
+        assert.equal(pin.properties.time, undefined);
         assert.deepEqual(pin.geometry.coordinates, [-108.53760088936559, 39.078463577137946, 1393.2000732421875]);
-        assert.match(String(pin.properties!.remarks), /Staging area/);
-        assert.match(String(pin.properties!.remarks), /Created by: Nicholas Ingalls/);
-        assert.match(String(pin.properties!.remarks), /Layer: share/);
-        const meta = pin.properties!.metadata as Record<string, unknown>;
+        assert.match(String(pin.properties.remarks), /Staging area/);
+        assert.match(String(pin.properties.remarks), /Created by: Nicholas Ingalls/);
+        assert.match(String(pin.properties.remarks), /Layer: share/);
+        const meta = pin.properties.metadata as Record<string, unknown>;
         assert.equal(meta.device_class, 'pin');
         assert.equal(meta.element_type, 'point');
         assert.equal(meta.group_type, 'app_shared');
@@ -692,16 +731,16 @@ test('control - submits map pins, lines & polygons', async () => {
         assert.equal(meta.project_uuid, PROJECT_A);
 
         const line = submitted[0].features.find((f) => f.id === 'dji-pin-el-line')!;
-        assert.equal(line.properties!.type, 'u-d-f');
-        assert.equal(line.properties!.stroke, '#19BE6B');
-        assert.equal(line.properties!.fill, undefined);
+        assert.equal(line.properties.type, 'u-d-f');
+        assert.equal(line.properties.stroke, '#19BE6B');
+        assert.equal(line.properties.fill, undefined);
         assert.equal(line.geometry.type, 'LineString');
-        assert.equal((line.properties!.metadata as Record<string, unknown>).group_type, 'default');
+        assert.equal((line.properties.metadata as Record<string, unknown>).group_type, 'default');
 
         const poly = submitted[0].features.find((f) => f.id === 'dji-pin-el-poly')!;
-        assert.equal(poly.properties!.type, 'u-d-f');
-        assert.equal(poly.properties!.fill, '#E23C39');
-        assert.equal(poly.properties!['fill-opacity'], 0.2);
+        assert.equal(poly.properties.type, 'u-d-f');
+        assert.equal(poly.properties.fill, '#E23C39');
+        assert.equal(poly.properties['fill-opacity'], 0.2);
         assert.deepEqual(poly.geometry.coordinates, [[[-108.538, 39.078], [-108.537, 39.078], [-108.537, 39.079], [-108.538, 39.078]]]);
     } finally {
         await api.close();
@@ -715,9 +754,9 @@ test('control - distributed pins only', async () => {
         const { submitted } = await run(api, { INCLUDE_PINS: true, PINS_DISTRIBUTED_ONLY: true });
 
         assert.ok(api.requests.some((r) => r.url === `/map/api/v1/workspaces/${PROJECT_A}/element-groups?is_distributed=true`));
-        const ids = submitted[0].features.map((f) => f.id);
-        assert.ok(ids.includes('dji-pin-el-poly'));
-        assert.ok(!ids.includes('dji-pin-el-line'));
+        const ids = new Set(submitted[0].features.map((f) => f.id));
+        assert.ok(ids.has('dji-pin-el-poly'));
+        assert.ok(!ids.has('dji-pin-el-line'));
     } finally {
         await api.close();
     }

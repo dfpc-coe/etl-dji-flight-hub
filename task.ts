@@ -90,15 +90,10 @@ export default class Task extends ETL {
         type: SchemaType = SchemaType.Input,
         flow: DataFlowType = DataFlowType.Incoming
     ): Promise<TSchema> {
-        if (flow === DataFlowType.Incoming) {
-            if (type === SchemaType.Input) {
-                return InputSchema;
-            } else {
-                return OutputSchema;
-            }
-        } else {
-            return Type.Object({});
-        }
+        if (flow !== DataFlowType.Incoming) return Type.Object({});
+        if (type === SchemaType.Input) return InputSchema;
+
+        return OutputSchema;
     }
 
     dji(env: Env): DJIApi {
@@ -117,10 +112,10 @@ export default class Task extends ETL {
         const projects = await api.projects();
 
         const limit = new Set(env.DJI_PROJECTS.map((project) => project.ProjectUUID.trim()));
-        if (!limit.size) return projects;
+        if (limit.size === 0) return projects;
 
         return Array.from(limit).map((uuid) => {
-            return projects.find((project) => project.uuid === uuid) || { uuid };
+            return projects.find((project) => project.uuid === uuid) ?? { uuid };
         });
     }
 
@@ -218,7 +213,7 @@ export default class Task extends ETL {
                     const state = await api.deviceState(entry.device.sn, entry.project.uuid);
                     const feats = state ? stateToFeatures(entry, state) : [];
 
-                    if (feats.length) {
+                    if (feats.length > 0) {
                         features.push(...feats);
                     } else if (env.DEBUG) {
                         console.log(`ok - ${entry.device.sn} did not report a location`);
@@ -270,10 +265,10 @@ export default class Task extends ETL {
 
         const onTelemetry = (telemetry: Telemetry) => {
             try {
-                const host = stripNulls(telemetry.host) as Record<string, unknown>;
-                latest.set(telemetry.sn, validate(DeviceState, { ...(latest.get(telemetry.sn) || {}), ...host }));
+                const host = stripNulls(telemetry.host);
+                latest.set(telemetry.sn, validate(DeviceState, { ...latest.get(telemetry.sn), ...host }));
             } catch (err) {
-                if (env.DEBUG) console.log(`ok - ${telemetry.sn} telemetry rejected: ${err instanceof Error ? err.message : err}`);
+                if (env.DEBUG) console.log(`ok - ${telemetry.sn} telemetry rejected:`, err instanceof Error ? err.message : err);
                 return;
             }
 
@@ -286,7 +281,7 @@ export default class Task extends ETL {
         };
 
         const flush = async () => {
-            if (flushing || !dirty.size) return;
+            if (flushing || dirty.size === 0) return;
             flushing = true;
 
             try {
@@ -296,7 +291,7 @@ export default class Task extends ETL {
                     const state = latest.get(sn);
                     if (!state) continue;
 
-                    const tracked = known.get(sn) || inferTracked(sn, state, projectOf.get(sn));
+                    const tracked = known.get(sn) ?? inferTracked(sn, state, projectOf.get(sn));
                     if (!this.included(env, tracked)) continue;
 
                     features.push(...stateToFeatures(tracked, state, true));
@@ -304,7 +299,7 @@ export default class Task extends ETL {
 
                 dirty.clear();
 
-                if (features.length) await this.submitFeatures(env, features);
+                if (features.length > 0) await this.submitFeatures(env, features);
             } catch (err) {
                 console.error('not ok - stream submit:', err instanceof Error ? err.message : err);
             } finally {
@@ -323,7 +318,9 @@ export default class Task extends ETL {
             interval: env.STREAM_INTERVAL,
             onTelemetry,
             onInterval: flush,
-            onClose: (code, received) => console.log(`ok - websocket closed (${code}) after ${received} telemetry messages`)
+            onClose: (code, received) => {
+                console.log(`ok - websocket closed (${code}) after ${received} telemetry messages`);
+            }
         });
 
         await flush();
@@ -359,7 +356,7 @@ export default class Task extends ETL {
             features.push(...pins);
         }
 
-        if (features.length) await this.submitFeatures(env, features);
+        if (features.length > 0) await this.submitFeatures(env, features);
 
         if (env.DJI_WEBSOCKET) {
             await this.stream(env, api, projects, new Map(devices.map((entry) => [entry.device.sn, entry])));
@@ -368,6 +365,6 @@ export default class Task extends ETL {
 }
 
 await local(await Task.init(import.meta.url), import.meta.url);
-export async function handler(event: Event = {}) {
-    return await internal(new Task(import.meta.url), event);
+export async function handler(event: Event = {}): ReturnType<typeof internal> {
+    return internal(new Task(import.meta.url), event);
 }

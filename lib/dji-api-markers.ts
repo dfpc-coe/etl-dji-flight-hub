@@ -1,5 +1,6 @@
 import { Type } from '@sinclair/typebox';
 import type { Static } from '@sinclair/typebox';
+import { Value } from '@sinclair/typebox/value';
 import type { Feature } from '@tak-ps/etl';
 import type { DJIApi, Project } from './dji-api.js';
 import { validPosition } from './dji-api.js';
@@ -46,8 +47,10 @@ export const MapElementGroup = Type.Object({
     elements: Type.Optional(Type.Array(MapElement))
 }, { additionalProperties: true });
 
+const MapElementGroupList = Type.Array(MapElementGroup);
+
 const MapElementGroups = Type.Union([
-    Type.Array(MapElementGroup),
+    MapElementGroupList,
     Type.Object({}, { additionalProperties: true })
 ]);
 
@@ -86,10 +89,19 @@ export type MarkerMetadata = {
 type Position = [number, number] | [number, number, number];
 
 function isPosition(value: unknown): value is Position {
-    return Array.isArray(value)
-        && (value.length === 2 || value.length === 3)
-        && value.every((entry) => typeof entry === 'number' && Number.isFinite(entry))
-        && validPosition(value[1], value[0]);
+    if (!Array.isArray(value) || (value.length !== 2 && value.length !== 3)) return false;
+
+    const entries: unknown[] = value;
+    return entries.every((entry): entry is number => typeof entry === 'number' && Number.isFinite(entry))
+        && validPosition(entries[1], entries[0]);
+}
+
+function isRing(value: unknown): value is Position[] {
+    return Array.isArray(value) && value.length >= 3 && value.every((position) => isPosition(position));
+}
+
+function isoTime(time?: number): string | undefined {
+    return time !== undefined && time !== 0 ? new Date(time).toISOString() : undefined;
 }
 
 /**
@@ -99,19 +111,21 @@ export function markerGeometry(type: string | undefined, coordinates: unknown): 
     if (type === 'Point') {
         return isPosition(coordinates) ? { type: 'Point', coordinates } : null;
     } else if (type === 'LineString') {
-        if (!Array.isArray(coordinates) || coordinates.length < 2 || !coordinates.every(isPosition)) return null;
+        if (!Array.isArray(coordinates) || coordinates.length < 2 || !coordinates.every((position) => isPosition(position))) return null;
         return { type: 'LineString', coordinates };
     } else if (type === 'Polygon') {
-        if (!Array.isArray(coordinates) || !coordinates.length) return null;
+        if (!Array.isArray(coordinates) || coordinates.length === 0) return null;
 
-        const rings = isPosition(coordinates[0]) ? [coordinates] : coordinates;
-        if (!rings.every((ring) => Array.isArray(ring) && ring.length >= 3 && ring.every(isPosition))) return null;
+        const rings: unknown[] = isPosition(coordinates[0]) ? [coordinates] : coordinates;
 
-        const closed = (rings as Position[][]).map((ring) => {
+        const closed: Position[][] = [];
+        for (const ring of rings) {
+            if (!isRing(ring)) return null;
+
             const first = ring[0];
-            const last = ring[ring.length - 1];
-            return first[0] === last[0] && first[1] === last[1] ? ring : [...ring, first];
-        });
+            const last = ring.at(-1) ?? first;
+            closed.push(first[0] === last[0] && first[1] === last[1] ? ring : [...ring, first]);
+        }
 
         return { type: 'Polygon', coordinates: closed };
     }
@@ -136,8 +150,8 @@ export async function markers(
 
     const found: Marker[] = [];
 
-    for (const group of Array.isArray(data) ? data : []) {
-        for (const element of group.elements || []) {
+    for (const group of Value.Check(MapElementGroupList, data) ? data : []) {
+        for (const element of group.elements ?? []) {
             found.push({ element, group, project });
         }
     }
@@ -177,8 +191,8 @@ export function markerToFeature(marker: Marker): Static<typeof Feature.InputFeat
         color,
         project: project.name,
         project_uuid: project.uuid,
-        created: element.create_time ? new Date(element.create_time).toISOString() : undefined,
-        updated: element.update_time ? new Date(element.update_time).toISOString() : undefined
+        created: isoTime(element.create_time),
+        updated: isoTime(element.update_time)
     };
 
     const feat: Static<typeof Feature.InputFeature> = {

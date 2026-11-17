@@ -47,13 +47,9 @@ export type StreamOptions = {
     onClose?: (code: number, received: number) => void;
 };
 
-type Message = {
-    biz_code?: unknown;
-    msg_trace_id?: unknown;
-    need_reply?: unknown;
-    to?: unknown;
-    data?: { sn?: unknown, host?: unknown };
-};
+function isObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null;
+}
 
 export class DJISocket {
     readonly opts: DJISocketOptions;
@@ -91,11 +87,17 @@ export class DJISocket {
                 finished = true;
                 for (const timer of timers) clearInterval(timer);
                 clearTimeout(deadline);
-                try { ws.close(); } catch { /* already closed */ }
+                try {
+                    ws.close();
+                } catch {
+                    // already closed
+                }
                 resolve();
             };
 
             const deadline = setTimeout(finish, opts.duration * 1000);
+
+            const ping = this.opts.ping ?? 0;
 
             ws.addEventListener('open', () => {
                 send({
@@ -104,7 +106,7 @@ export class DJISocket {
                     timestamp: Date.now(),
                     msg_trace_id: crypto.randomUUID(),
                     data: {
-                        codes: this.opts.codes || DefaultCodes,
+                        codes: this.opts.codes ?? DefaultCodes,
                         project: this.opts.project || '',
                         organization: this.opts.organization
                     }
@@ -112,16 +114,20 @@ export class DJISocket {
 
                 timers.push(setInterval(() => {
                     if (ws.readyState === WebSocket.OPEN) ws.send('ping');
-                }, (this.opts.ping || 15) * 1000));
+                }, (ping > 0 ? ping : 15) * 1000));
 
-                if (opts.onInterval && opts.interval) {
+                if (opts.onInterval && opts.interval !== undefined && opts.interval > 0) {
                     const onInterval = opts.onInterval;
-                    timers.push(setInterval(() => { onInterval(); }, opts.interval * 1000));
+                    timers.push(setInterval(() => {
+                        Promise.resolve(onInterval()).catch((err: unknown) => {
+                            console.error('not ok - websocket interval:', err);
+                        });
+                    }, opts.interval * 1000));
                 }
             });
 
             ws.addEventListener('message', (event) => {
-                let message: Message;
+                let message: unknown;
 
                 try {
                     message = JSON.parse(String(event.data));
@@ -129,18 +135,21 @@ export class DJISocket {
                     return;
                 }
 
-                if (message.need_reply && message.msg_trace_id) {
+                if (!isObject(message)) return;
+
+                if (Boolean(message.need_reply) && Boolean(message.msg_trace_id)) {
                     send({ biz_code: 'ack_reply', timestamp: Date.now(), data: { msg_trace_id: message.msg_trace_id } });
                 }
 
-                if (message.biz_code !== 'device_osd' || typeof message.data?.sn !== 'string') return;
-                if (!message.data.host || typeof message.data.host !== 'object') return;
+                const data = message.data;
+                if (message.biz_code !== 'device_osd' || !isObject(data) || typeof data.sn !== 'string') return;
+                if (!isObject(data.host)) return;
 
                 received++;
 
                 opts.onTelemetry({
-                    sn: message.data.sn,
-                    host: message.data.host as Record<string, unknown>,
+                    sn: data.sn,
+                    host: data.host,
                     to: Array.isArray(message.to) ? message.to.map(String) : []
                 });
             });

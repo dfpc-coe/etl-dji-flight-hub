@@ -95,7 +95,8 @@ export function stateToFeatures(
 ): Static<typeof Feature.InputFeature>[] {
     const { device, device_class, gateway, project } = tracked;
 
-    if (!validPosition(state.latitude, state.longitude)) return [];
+    const { latitude, longitude } = state;
+    if (latitude === undefined || longitude === undefined || !validPosition(latitude, longitude)) return [];
 
     const model = device.device_model?.name;
     const status = modeName(device_class, state.mode_code ?? device.mode_code);
@@ -170,7 +171,7 @@ export function stateToFeatures(
         },
         geometry: {
             type: 'Point',
-            coordinates: [state.longitude as number, state.latitude as number, state.height ?? 0]
+            coordinates: [longitude, latitude, state.height ?? 0]
         }
     };
 
@@ -243,5 +244,5 @@ export function inferTracked(sn: string, state: Static<typeof DeviceState>, proj
         device_class = 'dock';
     }
 
-    return { device_class, device: { sn }, project: project || { uuid: '' } };
+    return { device_class, device: { sn }, project: project ?? { uuid: '' } };
 }
